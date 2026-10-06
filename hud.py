@@ -65,7 +65,6 @@ GRIP_R = 5           # kose yaricapi
 GRIP_GAP = 5         # isikla tutamac arasi
 GRIP_DOT = 1.6       # tutamactaki nokta yaricapi
 GRIP_PITCH = 6       # noktalar arasi mesafe
-GRIP_DOUBLE = 150    # bu kadar piksel surukleme boyutu iki katina cikarir
 GRIP_SHOW_MS = 320   # uzerine gelince bu kadar bekleyip ac
 GRIP_HIDE_MS = 480   # ayrilinca bu kadar bekleyip kapat
 GRIP_TOP = (46, 48, 56)
@@ -478,12 +477,17 @@ class HUD:
         self._grip_on = False
         self._grip_size = (0, 0)
         self._grip_dragging = False
-        self._drag_y = 0
-        self._drag_zoom = DEFAULT_ZOOM
         self._anchor = None
         self._steps = None
         self._near_at = None
         self._away_at = None
+        # Pencerenin konumu burada tutuluyor; winfo_x/y geometri degisiminden
+        # hemen sonra eski degeri dondurdugu icin ona guvenilmiyor.
+        self._xy = (0, 0)
+        self._grip_xy = (0, 0)
+        self._zoom_job = None
+        self._grab_off = 0
+        self._dx = self._dy = 0
 
         self.zoom = read_zoom()
         self._renderers = {}
@@ -591,7 +595,7 @@ class HUD:
         bw, bh = w + 2 * pad, h + 2 * pad
         lw, lh = self._size
         if lx is None:
-            lx, ly = self.root.winfo_x(), self.root.winfo_y()
+            lx, ly = self._xy
         x = lx + (lw - bw) // 2
         y = ly + lh + int(round(GRIP_GAP * s)) - pad
         sw = self.root.winfo_screenwidth()
@@ -599,8 +603,10 @@ class HUD:
         if y + bh > sh - 4:                       # asagi sigmiyorsa ustte goster
             y = ly - bh - int(round(GRIP_GAP * s)) + pad
         x = max(2, min(sw - bw - 2, x))
+        y = max(2, y)
         self._grip_size = (bw, bh)
-        self.grip.geometry(f"{bw}x{bh}+{x}+{max(2, y)}")
+        self._grip_xy = (x, y)
+        self.grip.geometry(f"{bw}x{bh}+{x}+{y}")
 
     def _show_grip(self):
         if not HAVE_PIL:
@@ -619,12 +625,10 @@ class HUD:
         if self.grip is not None:
             self.grip.withdraw()
 
-    def _over(self, px, py, win, size, slack):
-        """Imlec bu pencerenin uzerinde mi? (biraz pay birakarak)"""
-        try:
-            x, y = win.winfo_x(), win.winfo_y()
-        except tk.TclError:
-            return False
+    @staticmethod
+    def _over(px, py, xy, size, slack):
+        """Imlec bu dikdortgenin uzerinde mi? (biraz pay birakarak)"""
+        x, y = xy
         w, h = size
         return (x - slack <= px <= x + w + slack and
                 y - slack <= py <= y + h + slack)
@@ -641,9 +645,9 @@ class HUD:
         except tk.TclError:
             return
         now = time.perf_counter()
-        on_light = self._over(px, py, self.root, self._size, 0)
-        on_grip = (self._grip_on and self.grip is not None and
-                  self._over(px, py, self.grip, self._grip_size, 10))
+        on_light = self._over(px, py, self._xy, self._size, 0)
+        on_grip = (self._grip_on and
+                   self._over(px, py, self._grip_xy, self._grip_size, 10))
 
         if self._grip_dragging or on_light or on_grip:
             self._away_at = None
@@ -661,14 +665,14 @@ class HUD:
                     self._hide_grip()
 
     def _grip_press(self, e):
-        # Referans basildigi anda donduruluyor: tutamac isikla birlikte yer
-        # degistirse de surukleme kaymiyor (basili tutuldugu surece olaylar
-        # zaten bu pencereye geliyor).
+        # Gercek bir ayirici gibi: ust kenar yerinde kalir, alt kenar (ve
+        # tutamac) imleci birebir izler. Basildigi andaki imlec-alt kenar
+        # mesafesi saklanip surukleme boyunca korunuyor.
+        lx, ly = self._xy
+        lw, lh = self._size
         self._grip_dragging = True
-        self._drag_y = e.y_root
-        self._drag_zoom = self.zoom
-        self._anchor = (self.root.winfo_x() + self._size[0] / 2.0,
-                        self.root.winfo_y() + self._size[1] / 2.0)
+        self._anchor = ("top", lx + lw / 2.0, ly)
+        self._grab_off = e.y_root - (ly + lh)
         self._away_at = None
         self._draw_grip()
 
@@ -682,12 +686,27 @@ class HUD:
             self._place_grip()
 
     def _grip_move(self, e):
-        # Fare olaylari kareden sik gelebiliyor; hedef burada not edilip
-        # animasyon dongusunde bir kez uygulaniyor.
         self._away_at = None
-        dy = e.y_root - self._drag_y
-        self._pending_zoom = self._drag_zoom * 2.0 ** (
-            dy / (GRIP_DOUBLE * self.dpi))
+        want_h = e.y_root - self._grab_off - self._anchor[2]
+        self._request_zoom(self._zoom_for_height(want_h))
+
+    def _zoom_for_height(self, h):
+        """Pencere yuksekligi tam olarak h olsun diye gereken oran."""
+        return h / ((BOX_H + 2 * MARGIN) * self.dpi)
+
+    def _request_zoom(self, z):
+        # Fare olaylari cizimden hizli gelebiliyor; en son istenen boyut
+        # tutulup olay kuyrugu bosaldiginda bir kez uygulaniyor. Animasyon
+        # karesini (33 ms) beklemedigi icin gecikme hissedilmiyor.
+        self._pending_zoom = z
+        if self._zoom_job is None:
+            self._zoom_job = self.root.after_idle(self._flush_zoom)
+
+    def _flush_zoom(self):
+        self._zoom_job = None
+        if self._pending_zoom is not None:
+            z, self._pending_zoom = self._pending_zoom, None
+            self.set_zoom(z)
 
     # ---------- boyut ----------
 
@@ -722,7 +741,7 @@ class HUD:
             y += int(19 * scale)
         return w, h
 
-    def set_zoom(self, z, paint=True):
+    def set_zoom(self, z):
         """Kademeyi degistirir; isik yerinde buyuyup kuculsun diye merkez sabit."""
         z = max(ZOOM_MIN, min(ZOOM_MAX, z))
         self.zoom = z
@@ -730,29 +749,34 @@ class HUD:
         # sirasinda is yalnizca gercekten bir piksel degistiginde yapiliyor.
         if window_size(self.dpi * z) == self._size and self.renderer is not None:
             return
-        # Capa noktasi: surukleme boyunca basta hesaplanan merkez kullanilir.
-        # Her adimda yeniden olcmek tam sayi bolmesi yuzunden isigi birkac
-        # piksel kaydiriyordu (titreme gibi gorunuyordu).
-        if self._anchor is None:
-            old_w, old_h = self._size
-            anchor = (self.root.winfo_x() + old_w / 2.0,
-                      self.root.winfo_y() + old_h / 2.0)
-        else:
-            anchor = self._anchor
-        cx, cy = anchor
+
+        # Capa: ayirici suruklenirken ust kenar sabit ("top"); tekerlek ve
+        # menude merkez sabit. Surukleme boyunca basta alinan deger
+        # kullanildigi icin isik yuvarlama yuzunden kaymiyor.
+        lx, ly = self._xy
+        lw, lh = self._size
+        anchor = self._anchor or ("center", lx + lw / 2.0, ly + lh / 2.0)
 
         w, h = self._build_size()
         self._size = (w, h)
 
-        # Once yeni gorsel, hemen ardindan yeni geometri: ikisi ayni geri
-        # cagirmada oldugu icin arada eski resim yeni pencerede gorunmuyor.
-        if paint and self._steps is not None:
+        # Yeni cizer = yeni boyutta resim. Her zaman yeniden ciziliyor;
+        # eskiden yalnizca lamba rengi degisirse ciziliyordu ve sabit yanan
+        # kirmizida pencere buyurken icinde eski kucuk resim kaliyordu.
+        self._sig = None
+        if self._steps is not None:
             self._paint(self._steps)
 
         sw = self.root.winfo_screenwidth()
         sh = self.root.winfo_screenheight()
-        x = max(-w + 24, min(sw - 24, int(round(cx - w / 2.0))))
-        y = max(-20, min(sh - 20, int(round(cy - h / 2.0))))
+        x = int(round(anchor[1] - w / 2.0))
+        if anchor[0] == "top":
+            y = int(round(anchor[2]))
+        else:
+            y = int(round(anchor[2] - h / 2.0))
+        x = max(-w + 24, min(sw - 24, x))
+        y = max(-20, min(sh - 20, y))
+        self._xy = (x, y)
         self.root.geometry(f"{w}x{h}+{x}+{y}")
 
         if self._grip_on:
@@ -762,6 +786,9 @@ class HUD:
             # tutamac ortadan kayiyordu.
             self._place_grip(x, y)
             self.grip.lift()           # buyuyen isik cubugu ortmesin
+        # Bekleyen cizimi hemen bosalt: pencere yeni boyuta gecerken icerik de
+        # ayni anda yenilensin, arada bos ya da eski bir kare gorunmesin.
+        self.root.update_idletasks()
         # Surukleme suruyorsa her adimda diske yazma; bitince bir kez yaz.
         if self._anchor is None:
             self._save_zoom()
@@ -783,17 +810,17 @@ class HUD:
     # Ctrl + sol tik surukleme: asagi cekince buyur, yukari cekince kuculur.
     # Dugme olaylari odak gerektirmedigi icin bu her zaman calisir.
     def _resize_grab(self, e):
+        lx, ly = self._xy
+        lw, lh = self._size
         self._resizing = True
-        self._ry = e.y_root
-        self._rzoom = self.zoom
-        self._anchor = (self.root.winfo_x() + self._size[0] / 2.0,
-                        self.root.winfo_y() + self._size[1] / 2.0)
+        self._anchor = ("top", lx + lw / 2.0, ly)
+        self._grab_off = e.y_root - (ly + lh)
 
     def _resize_drag(self, e):
         if not self._resizing:
             return
-        self._pending_zoom = self._rzoom * 2.0 ** (
-            (e.y_root - self._ry) / (GRIP_DOUBLE * self.dpi))
+        want_h = e.y_root - self._grab_off - self._anchor[2]
+        self._request_zoom(self._zoom_for_height(want_h))
 
     def _release(self, _e=None):
         if self._resizing:
@@ -822,6 +849,7 @@ class HUD:
                 x, y = px, py
         except Exception:
             pass
+        self._xy = (x, y)
         self.root.geometry(f"{w}x{h}+{x}+{y}")
 
     def _bind(self):
@@ -860,28 +888,34 @@ class HUD:
             self.menu.grab_release()
 
     def _grab(self, e):
-        self._dx, self._dy = e.x, e.y
+        # imlecin pencereye gore yeri; tasima sirasinda ekran koordinati
+        # kullaniliyor ki gecikmeli winfo_x yuzunden isik titremesin
+        x, y = self._xy
+        self._dx, self._dy = e.x_root - x, e.y_root - y
 
     def _drag(self, e):
         if self._resizing:
             return
-        x = self.root.winfo_x() + e.x - self._dx
-        y = self.root.winfo_y() + e.y - self._dy
+        x, y = e.x_root - self._dx, e.y_root - self._dy
+        self._xy = (x, y)
         self.root.geometry(f"+{x}+{y}")
         if self._grip_on:
-            self._place_grip()
+            self._place_grip(x, y)
 
     def _save_pos(self, _e=None):
         try:
             with open(POS_FILE, "w", encoding="utf-8") as f:
-                f.write(f"{self.root.winfo_x()},{self.root.winfo_y()}")
+                f.write("%d,%d" % self._xy)
         except Exception:
             pass
 
     def center(self):
-        self.root.update_idletasks()
-        x = (self.root.winfo_screenwidth() - self.root.winfo_width()) // 2
-        self.root.geometry(f"+{x}+{int(6 * self.dpi)}")
+        x = (self.root.winfo_screenwidth() - self._size[0]) // 2
+        y = int(6 * self.dpi)
+        self._xy = (x, y)
+        self.root.geometry(f"+{x}+{y}")
+        if self._grip_on:
+            self._place_grip(x, y)
         self._save_pos()
 
     # ---------- dongu ----------
@@ -896,10 +930,6 @@ class HUD:
         self.root.after(POLL_MS, self.poll)
 
     def animate(self):
-        if self._pending_zoom is not None:
-            z, self._pending_zoom = self._pending_zoom, None
-            self.set_zoom(z, paint=False)   # bu karede zaten cizilecek
-
         cfg = STATES[self.state]
         active = cfg["idx"]
 
