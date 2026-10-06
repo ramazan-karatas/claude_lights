@@ -9,7 +9,7 @@ bicimindeki etiketler de okunur; ayarlardan durum yazisi acilirsa isigin
 altinda gosterilir.
 
   Sol tik + surukle        : tasi (konum hatirlanir)
-  Alttaki tutamak          : noktalari surukle = boyutlandir, disli = ayarlar
+  Alttaki tutamak          : oku surukle = boyutlandir, disli = ayarlar
   Tekerlek                 : boyutlandir
   Ctrl + sol tik + surukle : boyutlandir
   Sag tik                  : menu (Ayarlar / Buyut / Kucult / Normal boyut /
@@ -61,18 +61,16 @@ DEFAULT_SETTINGS = {
     "label": False,      # durum yazisini goster
 }
 
-# Isigin altinda beliren tutamac: solda ayirici noktalari, sagda disli
+# Isigin altinda beliren tutamac: solda boyutlandirma oku, sagda disli
 CHIP_W = 44          # tutamac genisligi
 CHIP_H = 13          # tutamac yuksekligi
 CHIP_SPLIT = 27      # ayirici ile disli arasindaki cizgi (soldan)
 CHIP_GAP = 5         # ustteki ogeyle (isik ya da yazi) tutamac arasi
-CHIP_DOT = 1.6       # nokta yaricapi
-CHIP_PITCH = 6       # noktalar arasi mesafe
 CHIP_SHOW_MS = 320   # uzerine gelince bu kadar bekleyip ac
 CHIP_HIDE_MS = 480   # ayrilinca bu kadar bekleyip kapat
 CHIP_TOP = (48, 50, 58)
 CHIP_BOTTOM = (27, 28, 34)
-CHIP_DOT_RGB = (168, 172, 184)
+CHIP_ARROW_RGB = (168, 172, 184)
 CHIP_GEAR_RGB = (190, 194, 205)
 
 # Durum yazisi: isigin altinda, isikla birlikte buyuyup kuculen bir plaka
@@ -864,21 +862,24 @@ class HUD:
                 (pad + split, pad + h - int(round(3 * s)))],
                fill=(70, 73, 84), width=max(1, int(round(0.6 * s))))
 
-        # noktalar - suruklerken yanan lambanin rengini aliyor
+        # Dikey cift yonlu ok: buranin boyut icin oldugunu anlatiyor (Windows'un
+        # dikey boyutlandirma imleciyle ayni isaret). Suruklerken yanan
+        # lambanin rengini aliyor.
         cx, cy = pad + split / 2.0 + 0.5 * s, pad + h / 2.0
-        dr, pitch = CHIP_DOT * s, CHIP_PITCH * s
+        a, hw, hh, sw = 4.9 * s, 3.0 * s, 2.8 * s, 0.8 * s  # yarim boy, uc, govde
         iw, ih = img.size
 
-        def dots(dd, k):
-            for i in (-1, 0, 1):
-                x = cx + i * pitch
-                dd.ellipse([(x - dr) * k, (cy - dr) * k, (x + dr) * k, (cy + dr) * k],
-                           fill=255)
+        def arrow(dd, k):
+            for tip, base in ((cy - a, cy - a + hh), (cy + a, cy + a - hh)):
+                dd.polygon([(cx * k, tip * k), ((cx - hw) * k, base * k),
+                            ((cx + hw) * k, base * k)], fill=255)
+            dd.rectangle([(cx - sw) * k, (cy - a + hh - 0.3 * s) * k,
+                          (cx + sw) * k, (cy + a - hh + 0.3 * s) * k], fill=255)
 
-        color = STATES[self.state]["rgb"] if grip_hot else CHIP_DOT_RGB
+        color = STATES[self.state]["rgb"] if grip_hot else CHIP_ARROW_RGB
         lay = Image.new("RGBA", (iw, ih), color + (0,))
-        lay.putalpha(ss_mask(iw, ih, dots).point(
-            lambda v: v * (255 if grip_hot else 205) // 255))
+        lay.putalpha(ss_mask(iw, ih, arrow).point(
+            lambda v: v * (255 if grip_hot else 215) // 255))
         img.paste(lay, (0, 0), lay)
 
         draw_icon(img, pad + split + (w - split) / 2.0, cy + 0.3 * s, GEAR_GLYPH,
@@ -896,6 +897,7 @@ class HUD:
             self.chip_view.bind("<Button-1>", self._chip_press)
             self.chip_view.bind("<B1-Motion>", self._chip_move)
             self.chip_view.bind("<ButtonRelease-1>", self._chip_release)
+            self.chip_view.bind("<Motion>", self._chip_cursor)
         self._chip_on = True
         self._draw_chip()
         self._layout()
@@ -908,6 +910,13 @@ class HUD:
         self._near_at = self._away_at = None
         if self.chip is not None:
             self.chip.withdraw()
+
+    def _chip_cursor(self, e):
+        # Imlec de anlatsin: okun uzerinde dikey boyutlandirma, dislide el.
+        _, pad, _, _, split = self._chip_metrics()
+        cursor = "hand2" if e.x >= pad + split else "sb_v_double_arrow"
+        if self.chip_view.cget("cursor") != cursor:
+            self.chip_view.configure(cursor=cursor)
 
     def _chip_press(self, e):
         _, pad, _, _, split = self._chip_metrics()
