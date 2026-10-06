@@ -898,6 +898,8 @@ class Panel:
                         self.row_cy["size"] + self.row // 2)),
             ("reset", (m + self.pad - s(6), self.foot_y,
                        m + self.pad + reset_w + s(6), m + self.h)),
+            ("quit", (right - int(self.f_small.getlength("Kapat")) - s(6), self.foot_y,
+                      right + s(6), m + self.h)),
         ]
         for key, _, kind in self.ROWS:
             cy = self.row_cy[key]
@@ -1049,6 +1051,9 @@ class Panel:
         stroke(img, st["text"] if hover == "reset" else st["muted"], lambda d: d.text(
             (m + self.pad, self.foot_y + self.foot // 2), "Varsayılana dön",
             font=self.f_small, fill=255, anchor="lm"))
+        stroke(img, (232, 72, 66) if hover == "quit" else st["muted"], lambda d: d.text(
+            (m + self.w - self.pad, self.foot_y + self.foot // 2), "Kapat",
+            font=self.f_small, fill=255, anchor="rm"))
         draw_icon(img, self.close_c[0], self.close_c[1], CLOSE_GLYPH, self.icon_px,
                   st["text"] if hover == "close" else st["muted"])
         return img
@@ -1513,6 +1518,8 @@ class HUD:
             self._close_panel()
         elif region == "reset":
             self._reset_settings()
+        elif region == "quit":
+            self.root.destroy()             # uygulamayi kapat
         elif region and region.startswith("seg:"):
             _, key, value = region.split(":")
             self._choose(key, value)
