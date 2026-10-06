@@ -15,13 +15,18 @@ altinda gosterilir.
   Sag tik                  : menu (Ayarlar / Buyut / Kucult / Normal boyut /
                              Ortala / Kapat)
 
-Fare isigin uzerine gelince altinda kucuk bir tutamac belirir: sol yarisi
-ayirici gibi suruklenip boyutu degistirir, sagindaki disli ayarlar panelini
-acar. Boyut, konum ve ayarlar hatirlanir.
+Ayarlardan iki tasarim (Klasik, Sivi cam) ve iki tema (Siyah, Beyaz)
+secilir. Sivi cam tasariminda govdeler arkadaki masaustunu bulanik ve
+kenarlarda kirilmis gosterir. Bunun icin pencereler ekran yakalamadan haric
+tutuluyor; yani bu tasarimda HUD ekran goruntulerinde ve kayitlarda gorunmez.
 
 Gercek bir sinyal diregindeki gibi ustte kirmizi, ortada sari, altta yesil
 lamba vardir. Yalnizca sirasi gelen yanar, otekiler sonuk cam gibi kalir;
 durum degisince eski lamba soner, yenisi yanar.
+
+Pencereler Tk'nin kendi cizimini kullanmaz: her biri piksel basina saydam
+bir bitmap gosterir (UpdateLayeredWindow). Boylece kenarlar her zeminde
+temiz, golgeler yumusak ve cam gercekten arkasini gosterebiliyor.
 """
 
 import os
@@ -32,17 +37,20 @@ import time
 import ctypes
 import tempfile
 import tkinter as tk
-from ctypes import wintypes
+from ctypes import wintypes as wt
 
-from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont, ImageTk
+from PIL import (Image, ImageChops, ImageDraw, ImageEnhance, ImageFilter,
+                 ImageFont)
 
 STATE_FILE = os.path.join(tempfile.gettempdir(), "cc_hud_state.txt")
 POS_FILE = os.path.join(tempfile.gettempdir(), "cc_hud_pos.txt")
 ZOOM_FILE = os.path.join(tempfile.gettempdir(), "cc_hud_zoom.txt")
 SETTINGS_FILE = os.path.join(tempfile.gettempdir(), "cc_hud_settings.json")
 
-POLL_MS = 150    # durum dosyasi okuma araligi
-FRAME_MS = 33    # ~30 fps animasyon
+POLL_MS = 150        # durum dosyasi okuma araligi
+FRAME_MS = 33        # ~30 fps animasyon
+BACKDROP_MS = 250    # sivi cam: arkadaki masaustunu yeniden okuma araligi
+BACKDROP_EDGE = 10   # kenar kirilmasi icin govdenin disindan da okunan pay
 
 # Boyut surekli: tek sinir alt/ust uc. Yeniden cizim yalnizca pencerenin tam
 # sayi piksel olcusu degistiginde yapiliyor, yani gecisler 1 piksel
@@ -53,8 +61,16 @@ DEFAULT_ZOOM = 1.0
 ZOOM_WHEEL = 1.10    # bir tekerlek tiki
 ZOOM_MENU = 1.25     # menuden buyut/kucult
 
-# Ayarlar paneli ve varsayilanlari
+# Gorunum secenekleri
+DESIGNS = ("solid", "glass")
+THEMES = ("dark", "light")
+CHOICES = {"design": DESIGNS, "theme": THEMES}
+CHOICE_LABELS = {"solid": "Klasik", "glass": "Sıvı cam",
+                 "dark": "Siyah", "light": "Beyaz"}
+
 DEFAULT_SETTINGS = {
+    "design": "solid",   # klasik ya da sivi cam
+    "theme": "dark",     # siyah ya da beyaz
     "topmost": True,     # her zaman ustte
     "pulse": True,       # nabiz animasyonu
     "lock": False,       # konumu kilitle
@@ -64,14 +80,10 @@ DEFAULT_SETTINGS = {
 # Isigin altinda beliren tutamac: solda boyutlandirma oku, sagda disli
 CHIP_W = 44          # tutamac genisligi
 CHIP_H = 13          # tutamac yuksekligi
-CHIP_SPLIT = 27      # ayirici ile disli arasindaki cizgi (soldan)
+CHIP_SPLIT = 27      # ok ile disli arasindaki cizgi (soldan)
 CHIP_GAP = 5         # ustteki ogeyle (isik ya da yazi) tutamac arasi
 CHIP_SHOW_MS = 320   # uzerine gelince bu kadar bekleyip ac
 CHIP_HIDE_MS = 480   # ayrilinca bu kadar bekleyip kapat
-CHIP_TOP = (48, 50, 58)
-CHIP_BOTTOM = (27, 28, 34)
-CHIP_ARROW_RGB = (168, 172, 184)
-CHIP_GEAR_RGB = (190, 194, 205)
 
 # Durum yazisi: isigin altinda, isikla birlikte buyuyup kuculen bir plaka
 CAP_PX = 11          # yazi boyu (boyut orani 1.0'da)
@@ -80,17 +92,16 @@ CAP_GAP = 4          # govdeyle plaka arasi
 CAP_MAX_CHARS = 48   # cok uzun ozel etiketler kisaltilir
 
 # Ayarlar paneli
-PANEL_W = 232
+PANEL_W = 236
 PANEL_HEAD = 40
 PANEL_ROW = 34
 PANEL_FOOT = 40
 PANEL_PAD = 16
 PANEL_GAP = 10       # isikla panel arasi
+PANEL_SHADOW = 14    # panel golgesi icin kenar payi
 
-TEXT_RGB = (233, 234, 240)
-MUTED_RGB = (146, 150, 162)
 ACCENT_RGB = (52, 211, 153)
-LINE_RGB = (48, 50, 58)
+KNOB_RGB = (246, 247, 249)
 
 FONTS_DIR = os.path.join(os.environ["WINDIR"], "Fonts")
 UI_FONT = "segoeui.ttf"
@@ -99,17 +110,11 @@ UIB_FONT = "seguisb.ttf"        # Segoe UI Semibold
 ICON_FONT = ("SegoeIcons.ttf"
              if os.path.exists(os.path.join(FONTS_DIR, "SegoeIcons.ttf"))
              else "segmdl2.ttf")
-GEAR_GLYPH = "\ue713"
-CLOSE_GLYPH = "\ue711"
-
-# Windows'ta bu renk tamamen seffaf olur (kose yuvarlatma bu sayede calisir).
-# Sanatta hic olusmayacak bir ton secildi: en koyu yer (6,7,9) oldugundan
-# R=5 ve G<R hicbir pikselde cikmaz, yani govdenin icinde delik acilmaz.
-KEY_RGB = (5, 4, 7)
-KEY_HEX = "#050407"
+GEAR_GLYPH = ""
+CLOSE_GLYPH = ""
 
 # Olculer (mantiksal piksel; DPI'ya gore olceklenir)
-MARGIN = 6           # kenar payi - kenar yumusatmasi icin
+MARGIN = 6           # govde cevresindeki pay - golge ve kenar yumusatmasi icin
 LAMP_R = 6           # lamba yaricapi
 LAMP_PITCH = 18      # lamba merkezleri arasi dikey mesafe
 BOX_PAD_X = 9        # govde ici yatay pay
@@ -118,10 +123,6 @@ BOX_W = 2 * BOX_PAD_X + 2 * LAMP_R
 BOX_H = 2 * BOX_PAD_Y + 2 * LAMP_PITCH + 2 * LAMP_R
 BOX_R = 11           # govdenin kose yaricapi
 BLOOM_R = 13         # yanan lambanin dagilma yaricapi
-
-BOX_TOP = (34, 36, 42)
-BOX_BOTTOM = (16, 17, 21)
-LAMP_OFF = (9, 10, 13)          # sonuk lambanin karistigi koyu ton
 
 # Gercek bir trafik lambasindaki gibi: kirmizi ustte, yesil altta.
 LAMP_ORDER = ("red", "yellow", "green")
@@ -136,6 +137,70 @@ STATES = {
 }
 LAMP_RGB = tuple(STATES[name]["rgb"] for name in LAMP_ORDER)
 
+
+# ---------- gorunum: tasarim x tema ----------
+
+def _style(design, theme, **colors):
+    colors.update(design=design, theme=theme)
+    return colors
+
+
+# Klasik tasarimda govdeler dikey degradeli kati yuzeyler. Sivi camda dolgu
+# arkadaki masaustunun bulanik goruntusu; ton, parlaklik, kenar isigi ve
+# golge buradaki degerlerle ustune ekleniyor.
+STYLES = {
+    ("solid", "dark"): _style(
+        "solid", "dark",
+        box=((34, 36, 42), (16, 17, 21)), chip=((48, 50, 58), (27, 28, 34)),
+        plate=((40, 42, 50), (22, 23, 28)), panel=((37, 39, 46), (22, 23, 28)),
+        hair=(255, 255, 255, 58), gloss=72, outline=(0, 0, 0, 0), shadow=90,
+        text=(233, 234, 240), muted=(146, 150, 162), line=(48, 50, 58, 255),
+        toggle_off=((60, 63, 72), (44, 46, 54)), track=(60, 63, 72, 255),
+        knob_ring=(0, 0, 0, 0),
+        seg_bg=((19, 20, 24), (25, 26, 31)), seg_on=((72, 75, 86), (57, 59, 68)),
+        seg_on_text=(255, 255, 255), press=(255, 255, 255, 26),
+        glyph=(168, 172, 184), gear=(190, 194, 205), divider=(70, 73, 84, 255),
+        socket=(6, 7, 9), lamp_off=(9, 10, 13), hover=(255, 255, 255, 12)),
+    ("solid", "light"): _style(
+        "solid", "light",
+        box=((248, 249, 251), (220, 222, 228)), chip=((254, 254, 255), (232, 234, 238)),
+        plate=((254, 254, 255), (234, 236, 240)), panel=((252, 252, 253), (240, 241, 244)),
+        hair=(255, 255, 255, 220), gloss=0, outline=(0, 0, 0, 40), shadow=60,
+        text=(26, 27, 32), muted=(104, 108, 118), line=(222, 224, 229, 255),
+        toggle_off=((214, 217, 223), (201, 204, 211)), track=(210, 213, 220, 255),
+        knob_ring=(0, 0, 0, 40),
+        seg_bg=((224, 226, 231), (231, 233, 237)), seg_on=((255, 255, 255), (249, 249, 251)),
+        seg_on_text=(26, 27, 32), press=(0, 0, 0, 16),
+        glyph=(92, 96, 106), gear=(92, 96, 106), divider=(206, 209, 215, 255),
+        socket=(52, 54, 62), lamp_off=(30, 32, 38), hover=(0, 0, 0, 10)),
+    ("glass", "dark"): _style(
+        "glass", "dark",
+        tint=(14, 16, 22, 104), panel_tint=(14, 16, 22, 146), fallback=(38, 40, 48),
+        bright=0.82, sat=1.5, blur=7.0, rim=(235, 85), sheen=46, glow=85, edge_light=26,
+        outline=(0, 0, 0, 70), shadow=70,
+        text=(242, 243, 247), muted=(184, 188, 198), line=(255, 255, 255, 36),
+        toggle_off=((255, 255, 255, 54), (255, 255, 255, 38)), track=(255, 255, 255, 58),
+        knob_ring=(0, 0, 0, 0),
+        seg_bg=((0, 0, 0, 62), (0, 0, 0, 46)), seg_on=((255, 255, 255, 74), (255, 255, 255, 50)),
+        seg_on_text=(255, 255, 255), press=(255, 255, 255, 30),
+        glyph=(228, 231, 238), gear=(228, 231, 238), divider=(255, 255, 255, 58),
+        socket=(6, 7, 9), lamp_off=(9, 10, 13), hover=(255, 255, 255, 16)),
+    ("glass", "light"): _style(
+        "glass", "light",
+        tint=(255, 255, 255, 136), panel_tint=(255, 255, 255, 168), fallback=(232, 234, 238),
+        bright=1.12, sat=1.4, blur=7.0, rim=(250, 130), sheen=70, glow=115, edge_light=40,
+        outline=(0, 0, 0, 42), shadow=45,
+        text=(22, 23, 28), muted=(76, 80, 90), line=(0, 0, 0, 28),
+        toggle_off=((0, 0, 0, 46), (0, 0, 0, 32)), track=(0, 0, 0, 46),
+        knob_ring=(0, 0, 0, 34),
+        seg_bg=((0, 0, 0, 30), (0, 0, 0, 22)), seg_on=((255, 255, 255, 228), (255, 255, 255, 204)),
+        seg_on_text=(22, 23, 28), press=(0, 0, 0, 16),
+        glyph=(54, 58, 68), gear=(54, 58, 68), divider=(0, 0, 0, 44),
+        socket=(40, 42, 50), lamp_off=(28, 30, 36), hover=(0, 0, 0, 12)),
+}
+
+
+# ---------- dosyalar ----------
 
 def read_state():
     """(durum, etiket) dondurur. Dosya "green" ya da "green|Ozel yazi" olabilir."""
@@ -162,7 +227,10 @@ def read_settings():
             data = json.load(f)
         if isinstance(data, dict):
             for key, value in data.items():
-                if key in settings and isinstance(value, bool):
+                if key in CHOICES:
+                    if value in CHOICES[key]:
+                        settings[key] = value
+                elif key in settings and isinstance(value, bool):
                     settings[key] = value
     except Exception:
         pass
@@ -180,74 +248,6 @@ def save_settings(settings):
         pass
 
 
-# ---------- ortak cizim yardimcilari ----------
-
-_FONTS = {}
-
-
-def load_font(name, px):
-    """Windows yazi tipini istenen boyda verir (onbellekli)."""
-    key = (name, px)
-    font = _FONTS.get(key)
-    if font is None:
-        font = _FONTS[key] = ImageFont.truetype(os.path.join(FONTS_DIR, name), px)
-    return font
-
-
-def ss_mask(w, h, paint, ss=4):
-    """Buyuk cizip kucultulmus maske - kenarlar yumusak kalsin."""
-    m = Image.new("L", (w * ss, h * ss), 0)
-    paint(ImageDraw.Draw(m), ss)
-    return m.resize((w, h), Image.LANCZOS)
-
-
-def material(w, h, r, top, bottom, edge):
-    """Isigin malzemesi: dikey degrade + ustte belirgin, altta sonen kil cizgi."""
-    fill = ss_mask(w, h, lambda d, k: d.rounded_rectangle(
-        [0, 0, w * k - 1, h * k - 1], radius=r * k, fill=255))
-    ring = ss_mask(w, h, lambda d, k: d.rounded_rectangle(
-        [0, 0, w * k - 1, h * k - 1], radius=r * k, outline=255, width=max(2, k)))
-    body = Image.new("RGB", (w, h))
-    d = ImageDraw.Draw(body)
-    for y in range(h):
-        d.line([(0, y), (w, y)], fill=blend(top, bottom, y / max(1, h - 1)))
-    body = body.convert("RGBA")
-    body.putalpha(fill)
-    if edge:
-        fade = Image.new("L", (w, h))
-        fd = ImageDraw.Draw(fade)
-        for y in range(h):
-            fd.line([(0, y), (w, y)], fill=int(255 - 190 * y / max(1, h - 1)))
-        hair = Image.new("RGBA", (w, h), (255, 255, 255, 0))
-        hair.putalpha(ImageChops.multiply(ring, fade).point(lambda v: v * edge // 255))
-        body = Image.alpha_composite(body, hair)
-    return body
-
-
-def draw_icon(img, cx, cy, glyph, px, color):
-    """Windows simge yazisindan bir simge cizer."""
-    ImageDraw.Draw(img).text((cx, cy), glyph, font=load_font(ICON_FONT, px),
-                             fill=color, anchor="mm")
-
-
-def acquire_singleton():
-    """Ayni anda tek HUD calissin.
-
-    Ikinci kopya acilmaya calisirsa sessizce cikar; boylece bir baslatici
-    (ya da elle acma) ust uste pencere birakamaz. Kilit isletim sistemine
-    ait oldugu icin surec cokse bile kendiliginden serbest kalir.
-    """
-    # use_last_error olmadan ctypes.get_last_error() hep 0 doner;
-    # o yuzden windll yerine acikca WinDLL kuruluyor.
-    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    k32.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
-    k32.CreateMutexW.restype = wintypes.HANDLE
-    handle = k32.CreateMutexW(None, True, "Local\\cc_hud_singleton")
-    if not handle or ctypes.get_last_error() == 183:   # ALREADY_EXISTS
-        return None
-    return handle
-
-
 def read_zoom():
     """Kayitli boyut oranini dondurur."""
     try:
@@ -259,10 +259,407 @@ def read_zoom():
 
 
 def window_size(scale):
-    """Pencerenin bu olcekteki piksel olcusu - cizer kurmadan hesaplanir."""
+    """Isik penceresinin bu olcekteki piksel olcusu - cizer kurmadan."""
     def s(v):
         return int(round(v * scale))
     return s(BOX_W + 2 * MARGIN), s(BOX_H + 2 * MARGIN)
+
+
+# ---------- Windows ----------
+
+user32 = ctypes.WinDLL("user32", use_last_error=True)
+gdi32 = ctypes.WinDLL("gdi32")
+kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+GA_ROOT = 2
+GWL_EXSTYLE = -20
+WS_EX_LAYERED = 0x80000
+ULW_ALPHA = 2
+SRCCOPY = 0x00CC0020
+WDA_NONE = 0
+WDA_EXCLUDEFROMCAPTURE = 0x11
+
+
+class BITMAPINFOHEADER(ctypes.Structure):
+    _fields_ = [("biSize", wt.DWORD), ("biWidth", wt.LONG), ("biHeight", wt.LONG),
+                ("biPlanes", wt.WORD), ("biBitCount", wt.WORD),
+                ("biCompression", wt.DWORD), ("biSizeImage", wt.DWORD),
+                ("biXPelsPerMeter", wt.LONG), ("biYPelsPerMeter", wt.LONG),
+                ("biClrUsed", wt.DWORD), ("biClrImportant", wt.DWORD)]
+
+
+class BLENDFUNCTION(ctypes.Structure):
+    _fields_ = [("BlendOp", ctypes.c_ubyte), ("BlendFlags", ctypes.c_ubyte),
+                ("SourceConstantAlpha", ctypes.c_ubyte), ("AlphaFormat", ctypes.c_ubyte)]
+
+
+def _api(fn, restype, *argtypes):
+    # 64 bit tutamaclar int'e sigmiyor; tipler acikca bildirilmeli.
+    fn.restype = restype
+    fn.argtypes = list(argtypes)
+
+
+_api(user32.GetAncestor, wt.HWND, wt.HWND, wt.UINT)
+_api(user32.GetWindowLongPtrW, ctypes.c_ssize_t, wt.HWND, ctypes.c_int)
+_api(user32.SetWindowLongPtrW, ctypes.c_ssize_t, wt.HWND, ctypes.c_int, ctypes.c_ssize_t)
+_api(user32.GetDC, wt.HDC, wt.HWND)
+_api(user32.ReleaseDC, ctypes.c_int, wt.HWND, wt.HDC)
+_api(user32.UpdateLayeredWindow, wt.BOOL, wt.HWND, wt.HDC, ctypes.POINTER(wt.POINT),
+     ctypes.POINTER(wt.SIZE), wt.HDC, ctypes.POINTER(wt.POINT), wt.DWORD,
+     ctypes.POINTER(BLENDFUNCTION), wt.DWORD)
+_api(user32.SetWindowDisplayAffinity, wt.BOOL, wt.HWND, wt.DWORD)
+_api(gdi32.CreateCompatibleDC, wt.HDC, wt.HDC)
+_api(gdi32.CreateDIBSection, wt.HBITMAP, wt.HDC, ctypes.c_void_p, wt.UINT,
+     ctypes.POINTER(ctypes.c_void_p), wt.HANDLE, wt.DWORD)
+_api(gdi32.SelectObject, wt.HGDIOBJ, wt.HDC, wt.HGDIOBJ)
+_api(gdi32.DeleteObject, wt.BOOL, wt.HGDIOBJ)
+_api(gdi32.DeleteDC, wt.BOOL, wt.HDC)
+_api(gdi32.BitBlt, wt.BOOL, wt.HDC, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+     ctypes.c_int, wt.HDC, ctypes.c_int, ctypes.c_int, wt.DWORD)
+_api(kernel32.CreateMutexW, wt.HANDLE, wt.LPVOID, wt.BOOL, wt.LPCWSTR)
+
+
+class _Dib:
+    """Ekranla uyumlu, ustten alta 32 bitlik bir bitmap."""
+
+    def __init__(self, w, h):
+        self.screen = user32.GetDC(None)
+        self.dc = gdi32.CreateCompatibleDC(self.screen)
+        self.bits = ctypes.c_void_p()
+        header = BITMAPINFOHEADER(ctypes.sizeof(BITMAPINFOHEADER), w, -h, 1, 32)
+        self.bmp = gdi32.CreateDIBSection(self.dc, ctypes.byref(header), 0,
+                                          ctypes.byref(self.bits), None, 0)
+        self.old = gdi32.SelectObject(self.dc, self.bmp)
+
+    def close(self):
+        gdi32.SelectObject(self.dc, self.old)
+        gdi32.DeleteObject(self.bmp)
+        gdi32.DeleteDC(self.dc)
+        user32.ReleaseDC(None, self.screen)
+
+
+def present(hwnd, img, x, y):
+    """RGBA goruntuyu pencerenin icerigi yap ve pencereyi (x, y)'ye koy."""
+    w, h = img.size
+    r, g, b, a = img.split()
+    # Windows on carpilmis (premultiplied) BGRA bekliyor
+    data = Image.merge("RGBA", (ImageChops.multiply(b, a), ImageChops.multiply(g, a),
+                                ImageChops.multiply(r, a), a)).tobytes()
+    dib = _Dib(w, h)
+    try:
+        ctypes.memmove(dib.bits, data, len(data))
+        return bool(user32.UpdateLayeredWindow(
+            hwnd, dib.screen, ctypes.byref(wt.POINT(x, y)), ctypes.byref(wt.SIZE(w, h)),
+            dib.dc, ctypes.byref(wt.POINT(0, 0)), 0,
+            ctypes.byref(BLENDFUNCTION(0, 0, 255, 1)), ULW_ALPHA))
+    finally:
+        dib.close()
+
+
+def capture(x, y, w, h):
+    """Ekranin bir bolgesi. HUD pencereleri yakalamadan haric tutuldugunda
+    arkalarindaki goruntu gelir."""
+    dib = _Dib(w, h)
+    try:
+        gdi32.BitBlt(dib.dc, 0, 0, w, h, dib.screen, x, y, SRCCOPY)
+        data = ctypes.string_at(dib.bits, w * h * 4)
+    finally:
+        dib.close()
+    return Image.frombuffer("RGBA", (w, h), data, "raw", "BGRA", 0, 1).convert("RGB")
+
+
+class Layer:
+    """Icerigini Tk degil, piksel basina saydam bir bitmap belirleyen pencere.
+
+    Tamamen saydam pikseller tiklamayi alttaki pencereye gecirir. Tk'nin
+    pencere olcusu de her seferinde ayni tutuluyor ki olay koordinatlari ve
+    imlec dogru kalsin.
+    """
+
+    def __init__(self, win, topmost):
+        self.win = win
+        win.withdraw()
+        win.overrideredirect(True)
+        win.attributes("-topmost", topmost)
+        # Tk dis pencereyi ancak ilk gosterimde olusturuyor; bunu ekran
+        # disinda yapiyoruz. Pencere orada acik kaliyor: icerigi olmayan
+        # katmanli pencere zaten gorunmez. Gizleyip yeniden gostermek ise Tk'nin
+        # pencereyi diger katman kipine (SetLayeredWindowAttributes) almasina
+        # yol aciyor; o kipte UpdateLayeredWindow reddedilip Tk'nin duz gri
+        # zemini gorunuyordu.
+        win.geometry("1x1+-32000+-32000")
+        win.deiconify()
+        win.update_idletasks()
+        self.hwnd = user32.GetAncestor(win.winfo_id(), GA_ROOT)
+        self._make_layered()
+        self.img = None
+        self.xy = None
+        self.size = None
+        self.visible = True
+
+    def _make_layered(self):
+        # Katmanli bayragini kaldirip geri koymak pencereyi kipsiz baslatir;
+        # ardindan UpdateLayeredWindow kabul edilir.
+        ex = user32.GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE)
+        user32.SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, ex & ~WS_EX_LAYERED)
+        user32.SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, ex | WS_EX_LAYERED)
+
+    def show(self, img, x, y):
+        if self.visible and img is self.img and (x, y) == self.xy:
+            return                  # zaten ekranda, ayni yerde
+        if img.size != self.size or (x, y) != self.xy:
+            self.win.geometry("%dx%d+%d+%d" % (img.size[0], img.size[1], x, y))
+        self.img, self.size, self.xy = img, img.size, (x, y)
+        if not self.visible:
+            self.win.deiconify()
+            self.visible = True
+        if not present(self.hwnd, img, x, y):
+            # Tk pencereyi yeniden gosterirken diger katman kipine almis
+            # olabilir: kipi sifirlayip bir kez daha dene.
+            self._make_layered()
+            present(self.hwnd, img, x, y)
+
+    def move(self, x, y):
+        if self.img is not None:
+            self.show(self.img, x, y)
+
+    def hide(self):
+        if self.visible:
+            self.win.withdraw()
+            self.visible = False
+
+    def exclude_from_capture(self, on):
+        user32.SetWindowDisplayAffinity(self.hwnd, WDA_EXCLUDEFROMCAPTURE if on
+                                        else WDA_NONE)
+
+
+def acquire_singleton():
+    """Ayni anda tek HUD calissin.
+
+    Ikinci kopya acilmaya calisirsa sessizce cikar; boylece bir baslatici
+    (ya da elle acma) ust uste pencere birakamaz. Kilit isletim sistemine
+    ait oldugu icin surec cokse bile kendiliginden serbest kalir.
+    """
+    handle = kernel32.CreateMutexW(None, True, "Local\\cc_hud_singleton")
+    if not handle or ctypes.get_last_error() == 183:   # ALREADY_EXISTS
+        return None
+    return handle
+
+
+def enable_dpi_awareness():
+    ctypes.windll.shcore.SetProcessDpiAwareness(2)   # monitor basina
+
+
+# ---------- cizim yardimcilari ----------
+
+_FONTS = {}
+_CACHE = {}
+
+
+def load_font(name, px):
+    """Windows yazi tipini istenen boyda verir (onbellekli)."""
+    key = (name, px)
+    font = _FONTS.get(key)
+    if font is None:
+        font = _FONTS[key] = ImageFont.truetype(os.path.join(FONTS_DIR, name), px)
+    return font
+
+
+def cached(key, make):
+    value = _CACHE.get(key)
+    if value is None:
+        if len(_CACHE) > 600:
+            _CACHE.clear()
+        value = _CACHE[key] = make()
+    return value
+
+
+def rgba(color):
+    return tuple(color) if len(color) == 4 else tuple(color) + (255,)
+
+
+def blend(a, b, t):
+    return tuple(int(round(a[i] + (b[i] - a[i]) * t)) for i in range(3))
+
+
+def ss_mask(w, h, paint, ss=4):
+    """Buyuk cizip kucultulmus maske - kenarlar yumusak kalsin."""
+    m = Image.new("L", (w * ss, h * ss), 0)
+    paint(ImageDraw.Draw(m), ss)
+    return m.resize((w, h), Image.LANCZOS)
+
+
+def rounded(w, h, r, outline=False):
+    """Yuvarlak koseli dikdortgen maskesi ya da yalnizca kenar cizgisi."""
+    def make():
+        def paint(d, k):
+            box = [0, 0, w * k - 1, h * k - 1]
+            if outline:
+                d.rounded_rectangle(box, radius=r * k, outline=255, width=max(2, k))
+            else:
+                d.rounded_rectangle(box, radius=r * k, fill=255)
+        return ss_mask(w, h, paint)
+    return cached(("round", w, h, round(r, 2), outline), make)
+
+
+def ramp(w, h, top, bottom, power=1.0):
+    """Ustten alta degisen gri ton (0-255)."""
+    def make():
+        g = Image.new("L", (w, h))
+        d = ImageDraw.Draw(g)
+        for y in range(h):
+            t = (y / max(1, h - 1)) ** power
+            d.line([(0, y), (w, y)], fill=int(round(top + (bottom - top) * t)))
+        return g
+    return cached(("ramp", w, h, top, bottom, power), make)
+
+
+def gradient(w, h, top, bottom, power=1.0):
+    """Ustten alta renk gecisi (RGB ya da RGBA)."""
+    top, bottom = rgba(top), rgba(bottom)
+    img = Image.new("RGBA", (w, h))
+    d = ImageDraw.Draw(img)
+    for y in range(h):
+        t = (y / max(1, h - 1)) ** power
+        d.line([(0, y), (w, y)],
+               fill=tuple(int(round(top[i] + (bottom[i] - top[i]) * t)) for i in range(4)))
+    return img
+
+
+def colored(size, color, mask=None):
+    """Tek renkli katman; saydamligi maske ile rengin kendi saydamliginin carpimi."""
+    c = rgba(color)
+    layer = Image.new("RGBA", size, c[:3] + (0,))
+    alpha = mask if mask is not None else Image.new("L", size, 255)
+    if c[3] != 255:
+        alpha = alpha.point(lambda v, k=c[3]: v * k // 255)
+    layer.putalpha(alpha)
+    return layer
+
+
+def clip(img, mask):
+    img.putalpha(ImageChops.multiply(img.getchannel("A"), mask))
+    return img
+
+
+def stroke(img, color, draw):
+    """Bir maske cizip tek renkle uygula. Yazi ve cizgiler saydam katmana
+    dogrudan cizilince kenarlari kararir; maske uzerinden bu olmuyor."""
+    m = Image.new("L", img.size, 0)
+    draw(ImageDraw.Draw(m))
+    img.alpha_composite(colored(img.size, color, m))
+
+
+def draw_icon(img, cx, cy, glyph, px, color):
+    """Windows simge yazisindan bir simge cizer."""
+    font = load_font(ICON_FONT, px)
+    stroke(img, color, lambda d: d.text((cx, cy), glyph, font=font, fill=255,
+                                        anchor="mm"))
+
+
+def drop_shadow(w, h, r, pad, alpha):
+    """Govdenin altina dusen yumusak golge; (w+2pad, h+2pad) boyunda."""
+    def make():
+        dy = max(1, int(round(pad * 0.22)))
+        m = Image.new("L", (w + 2 * pad, h + 2 * pad), 0)
+        m.paste(rounded(w, h, r), (pad, pad + dy))
+        m = m.filter(ImageFilter.GaussianBlur(max(1.0, pad * 0.42)))
+        return m.point(lambda v: v * alpha // 255)
+    return colored((w + 2 * pad, h + 2 * pad), (0, 0, 0),
+                   cached(("shadow", w, h, round(r, 2), pad, alpha), make))
+
+
+def solid_body(w, h, r, kind, st):
+    """Klasik yuzey: dikey degrade, ustte belirgin kil cizgisi."""
+    top, bottom = st[kind]
+    fill = rounded(w, h, r)
+    ring = rounded(w, h, r, True)
+    body = clip(gradient(w, h, top, bottom, 0.82), fill)
+    hair = st["hair"]
+    body.alpha_composite(colored((w, h), hair[:3], ImageChops.multiply(
+        ring, ramp(w, h, hair[3], hair[3] * 23 // 100))))
+    if kind == "box" and st["gloss"]:
+        def make():
+            cut = max(1, int(h * 0.26))
+            fade = Image.new("L", (w, h), 0)
+            fd = ImageDraw.Draw(fade)
+            for y in range(cut):
+                fd.line([(0, y), (w, y)], fill=int(255 * (1 - y / cut) ** 2.2))
+            return ImageChops.multiply(ring, fade)
+        gloss = cached(("gloss", w, h, round(r, 2)), make)
+        body.alpha_composite(colored((w, h), (255, 255, 255, st["gloss"]), gloss))
+    if st["outline"][3]:
+        body.alpha_composite(colored((w, h), st["outline"], ring))
+    return body
+
+
+def glass_body(w, h, r, st, backdrop, tint, scale):
+    """Sivi cam: arkadaki bulanik masaustu, kenarlarda kirilmis; ustunde ton,
+    yumusak parlama ve kenar isigi."""
+    fill = rounded(w, h, r)
+    ring = rounded(w, h, r, True)
+    if backdrop is None:
+        base = Image.new("RGB", (w, h), st["fallback"])
+    else:
+        e = (backdrop.width - w) // 2
+        inner = backdrop.crop((e, e, e + w, e + h))
+        # Kenara yakin yerde govdenin disindaki goruntu iceri sikistirilarak
+        # gosteriliyor: isik kalin camin kenarinda kirilmis gibi.
+        squeezed = backdrop.resize((w, h), Image.BILINEAR)
+
+        def lens():
+            soft = fill.filter(ImageFilter.GaussianBlur(max(1.5, min(w, h) * 0.16)))
+            return ImageChops.subtract(fill, soft).point(lambda v: min(255, int(v * 3.5)))
+        band = cached(("lens", w, h, round(r, 2)), lens)
+        base = Image.composite(squeezed, inner, band)
+        base = ImageEnhance.Color(base).enhance(st["sat"])
+        base = ImageEnhance.Brightness(base).enhance(st["bright"])
+    body = base.convert("RGBA")
+    body.alpha_composite(colored((w, h), tint))
+    if backdrop is not None:
+        # kirilan isik kenarda toplanir: bant biraz aydinlik
+        body.alpha_composite(colored((w, h), (255, 255, 255, st["edge_light"]), band))
+
+    def sheen():
+        m = Image.new("L", (w, h), 0)
+        ImageDraw.Draw(m).ellipse([-w * 0.25, -h * 0.75, w * 1.25, h * 0.38], fill=255)
+        return m.filter(ImageFilter.GaussianBlur(max(1.0, min(w, h) * 0.15)))
+    body.alpha_composite(colored((w, h), (255, 255, 255, st["sheen"]),
+                                 cached(("sheen", w, h), sheen)))
+
+    def rim():
+        # kenar isigi: ustte guclu, ortada zayif, altta yansima kadar
+        top, bottom = st["rim"]
+        g = Image.new("L", (w, h))
+        d = ImageDraw.Draw(g)
+        for y in range(h):
+            t = y / max(1, h - 1)
+            d.line([(0, y), (w, y)], fill=int(top * (1 - t) ** 2 + bottom * t ** 2))
+        return ImageChops.multiply(ring, g)
+    body.alpha_composite(colored((w, h), (255, 255, 255),
+                                 cached(("rim", w, h, round(r, 2), st["rim"]), rim)))
+
+    def glow():
+        # camin kalinligi: kenarin hemen icinde yumusak bir aydinlik
+        soft = ring.filter(ImageFilter.GaussianBlur(max(1.0, 1.6 * scale)))
+        return ImageChops.multiply(soft, fill).point(lambda v: v * st["glow"] // 255)
+    body.alpha_composite(colored((w, h), (255, 255, 255),
+                                 cached(("glow", w, h, round(r, 2), st["glow"]), glow)))
+    if st["outline"][3]:
+        body.alpha_composite(colored((w, h), st["outline"], ring))
+    return clip(body, fill)
+
+
+def card(w, h, r, pad, kind, st, scale, backdrop=None):
+    """Golgesiyle bir yuzey: (w+2pad, h+2pad) RGBA, govde (pad, pad)'de."""
+    img = drop_shadow(w, h, r, pad, st["shadow"])
+    if st["design"] == "glass":
+        tint = st["panel_tint"] if kind == "panel" else st["tint"]
+        body = glass_body(w, h, r, st, backdrop, tint, scale)
+    else:
+        body = solid_body(w, h, r, kind, st)
+    img.alpha_composite(body, (pad, pad))
+    return img
 
 
 # Bloom ve yikama maskelerinin bicimi olcekle degismiyor (yaricap oranlari
@@ -295,24 +692,18 @@ def _radial_template(key, peak, power, core_ratio):
     return m
 
 
-def blend(a, b, t):
-    return tuple(int(round(a[i] + (b[i] - a[i]) * t)) for i in range(3))
-
-
-def enable_dpi_awareness():
-    ctypes.windll.shcore.SetProcessDpiAwareness(2)   # monitor basina
-
-
 class Renderer:
-    """Govdenin tum gorsel isini yapar; agir parcalari onbellekler."""
+    """Isigin tum gorsel isini yapar; agir parcalari onbellekler."""
 
-    def __init__(self, scale):
+    def __init__(self, scale, st):
         self.scale = scale
+        self.st = st
         self.pad = self.s(MARGIN)
         self.iw = self.s(BOX_W + 2 * MARGIN)
         self.ih = self.s(BOX_H + 2 * MARGIN)
         self.bw = self.iw - 2 * self.pad
         self.bh = self.ih - 2 * self.pad
+        self.r = self.s(BOX_R)
         self.lamp_r = self.s(LAMP_R)
         self.bloom_r = self.s(BLOOM_R)
 
@@ -324,73 +715,20 @@ class Renderer:
         self._washes = {}
         self._blooms = {}
         self._lamps = {}
-        self._fill = self._round_mask(False)
-        self._ring = self._round_mask(True)
+        self._fill = rounded(self.bw, self.bh, self.r)
         self._bloom_base = self._build_bloom_mask()
         self._wash_base = self._build_wash_mask()
-        self._base = self._build_base()
+        self.backdrop_version = None
+        self.set_backdrop(None)
 
     def s(self, v):
         return int(round(v * self.scale))
 
-    # ---------- govde ----------
-
-    def _round_mask(self, outline):
-        w, h, ss = self.bw, self.bh, 4
-        r = self.s(BOX_R) * ss
-        m = Image.new("L", (w * ss, h * ss), 0)
-        box = [0, 0, w * ss - 1, h * ss - 1]
-        if outline:
-            ImageDraw.Draw(m).rounded_rectangle(
-                box, radius=r, outline=255, width=max(2, ss))
-        else:
-            ImageDraw.Draw(m).rounded_rectangle(box, radius=r, fill=255)
-        return m.resize((w, h), Image.LANCZOS)
-
-    def _vgrad(self, top, bottom):
-        """Ustten alta duz gecisli gri - maskeleri zayiflatmak icin."""
-        g = Image.new("L", (self.bw, self.bh))
-        d = ImageDraw.Draw(g)
-        for y in range(self.bh):
-            t = y / max(1, self.bh - 1)
-            d.line([(0, y), (self.bw, y)], fill=int(round(top + (bottom - top) * t)))
-        return g
-
-    def _build_base(self):
-        """Lambasiz sinyal govdesi - yukaridan isik alan kati bir cisim."""
-        w, h = self.bw, self.bh
-
-        body = Image.new("RGB", (w, h))
-        d = ImageDraw.Draw(body)
-        for y in range(h):
-            t = (y / max(1, h - 1)) ** 0.82
-            d.line([(0, y), (w, y)], fill=blend(BOX_TOP, BOX_BOTTOM, t))
-        body = body.convert("RGBA")
-        body.putalpha(self._fill)
-
-        # kil payi cerceve: ustte belirgin, altta neredeyse yok
-        border = Image.new("RGBA", (w, h), (255, 255, 255, 0))
-        border.putalpha(ImageChops.multiply(self._ring, self._vgrad(255, 58))
-                        .point(lambda v: v * 54 // 255))
-        body = Image.alpha_composite(body, border)
-
-        # ust kenarda ince isik cizgisi
-        fade = Image.new("L", (w, h), 0)
-        fd = ImageDraw.Draw(fade)
-        cut = max(1, int(h * 0.26))
-        for y in range(cut):
-            fd.line([(0, y), (w, y)], fill=int(255 * (1 - y / cut) ** 2.2))
-        gloss = Image.new("RGBA", (w, h), (255, 255, 255, 0))
-        gloss.putalpha(ImageChops.multiply(self._ring, fade)
-                       .point(lambda v: v * 72 // 255))
-        body = Image.alpha_composite(body, gloss)
-
-        # Not: Windows renk anahtari yari saydamlik desteklemedigi icin
-        # gercek bir golge cizilemiyor; kenar yumusatmasi zaten ince koyu
-        # bir kenarlik birakiyor ve acik zeminde de temiz duruyor.
-        img = Image.new("RGB", (self.iw, self.ih), KEY_RGB)
-        img.paste(body, (self.pad, self.pad), body)
-        return img
+    def set_backdrop(self, backdrop, version=None):
+        """Govde: klasikte sabit, camda arkadaki masaustune gore."""
+        self._base = card(self.bw, self.bh, self.r, self.pad, "box", self.st,
+                          self.scale, backdrop)
+        self.backdrop_version = version
 
     # ---------- yanan lambanin govdeye vurmasi ----------
 
@@ -409,9 +747,8 @@ class Renderer:
             m = Image.new("L", (self.bw, self.bh), 0)
             m.paste(g, (self.lx - self.pad - g.width // 2,
                         self.ly[idx] - self.pad - g.height // 2))
-            m = ImageChops.multiply(m, self._fill)
-            img = Image.new("RGBA", (self.bw, self.bh), LAMP_RGB[idx] + (0,))
-            img.putalpha(m)
+            img = colored((self.bw, self.bh), LAMP_RGB[idx],
+                          ImageChops.multiply(m, self._fill))
             if len(self._washes) > 72:
                 self._washes.clear()
             self._washes[key] = img
@@ -430,16 +767,15 @@ class Renderer:
         img = self._blooms.get(key)
         if img is None:
             k = step / 20.0
-            mask = self._bloom_base.point(lambda v: int(v * k))
-            img = Image.new("RGBA", mask.size, LAMP_RGB[idx] + (0,))
-            img.putalpha(mask)
+            img = colored(self._bloom_base.size, LAMP_RGB[idx],
+                          self._bloom_base.point(lambda v: int(v * k)))
             if len(self._blooms) > 96:
                 self._blooms.clear()
             self._blooms[key] = img
         return img
 
     def lamp(self, idx, step):
-        """Lamba camı: step 0 sonuk, 20 tam yanik."""
+        """Lamba cami: step 0 sonuk, 20 tam yanik."""
         key = (idx, step)
         img = self._lamps.get(key)
         if img is not None:
@@ -447,50 +783,31 @@ class Renderer:
 
         k = step / 20.0
         rgb = LAMP_RGB[idx]
-        col = blend(blend(rgb, LAMP_OFF, 0.90), rgb, k)
+        col = blend(blend(rgb, self.st["lamp_off"], 0.90), rgb, k)
         col = blend(col, (255, 255, 255), 0.13 * k)
 
         r = self.lamp_r
         size = r * 2 + 4
-        ss = 4
-        c = size * ss / 2.0
-        socket = Image.new("L", (size * ss, size * ss), 0)
-        ImageDraw.Draw(socket).ellipse(
-            [c - (r + 1.4) * ss, c - (r + 1.4) * ss,
-             c + (r + 1.4) * ss, c + (r + 1.4) * ss], fill=255)
-        glass = Image.new("L", (size * ss, size * ss), 0)
-        ImageDraw.Draw(glass).ellipse(
-            [c - r * ss, c - r * ss, c + r * ss, c + r * ss], fill=255)
-        socket = socket.resize((size, size), Image.LANCZOS)
-        glass = glass.resize((size, size), Image.LANCZOS)
+        c = size / 2.0
+        socket = ss_mask(size, size, lambda d, s: d.ellipse(
+            [(c - r - 1.4) * s, (c - r - 1.4) * s, (c + r + 1.4) * s, (c + r + 1.4) * s],
+            fill=255))
+        glass = ss_mask(size, size, lambda d, s: d.ellipse(
+            [(c - r) * s, (c - r) * s, (c + r) * s, (c + r) * s], fill=255))
 
         # once koyu yuva, sonra cam - lamba govdeye oturmus gibi dursun
-        img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-        rim = Image.new("RGBA", (size, size), (6, 7, 9, 0))
-        rim.putalpha(socket)
-        img = Image.alpha_composite(img, rim)
-
+        img = colored((size, size), self.st["socket"], socket)
         top = blend(col, (255, 255, 255), 0.20 + 0.10 * k)
         bottom = blend(col, (0, 0, 0), 0.22 - 0.10 * k)
-        grad = Image.new("RGB", (size, size), bottom)
-        d = ImageDraw.Draw(grad)
-        for y in range(size):
-            d.line([(0, y), (size, y)], fill=blend(top, bottom, y / max(1, size - 1)))
-        bulb = grad.convert("RGBA")
-        bulb.putalpha(glass)
-        img = Image.alpha_composite(img, bulb)
+        img.alpha_composite(clip(gradient(size, size, top, bottom), glass))
 
         # cam boncuk parlamasi degil; ust yariya dusen genis, yumusak bir isik
-        spec = Image.new("L", (size * ss, size * ss), 0)
-        ImageDraw.Draw(spec).ellipse(
-            [int(size * ss * 0.18), int(size * ss * 0.10),
-             int(size * ss * 0.82), int(size * ss * 0.58)],
-            fill=int(42 + 34 * k))
-        spec = spec.resize((size, size), Image.LANCZOS)
+        spec = ss_mask(size, size, lambda d, s: d.ellipse(
+            [size * s * 0.18, size * s * 0.10, size * s * 0.82, size * s * 0.58],
+            fill=int(42 + 34 * k)))
         spec = spec.filter(ImageFilter.GaussianBlur(max(1.0, self.scale * 1.4)))
-        layer = Image.new("RGBA", (size, size), (255, 255, 255, 0))
-        layer.putalpha(ImageChops.multiply(spec, glass))
-        img = Image.alpha_composite(img, layer)
+        img.alpha_composite(colored((size, size), (255, 255, 255),
+                                    ImageChops.multiply(spec, glass)))
 
         if len(self._lamps) > 96:
             self._lamps.clear()
@@ -504,18 +821,17 @@ class Renderer:
 
         top = max(range(3), key=lambda i: steps[i])
         if steps[top]:
-            wash = self._wash(top, steps[top])
-            img.paste(wash, (self.pad, self.pad), wash)
+            img.alpha_composite(self._wash(top, steps[top]), (self.pad, self.pad))
 
         for i, st in enumerate(steps):
             if st:
                 sp = self.bloom(i, st)
-                img.paste(sp, (self.lx - sp.width // 2,
-                               self.ly[i] - sp.height // 2), sp)
+                img.alpha_composite(sp, (self.lx - sp.width // 2,
+                                         self.ly[i] - sp.height // 2))
         for i, st in enumerate(steps):
             sp = self.lamp(i, st)
-            img.paste(sp, (self.lx - sp.width // 2,
-                           self.ly[i] - sp.height // 2), sp)
+            img.alpha_composite(sp, (self.lx - sp.width // 2,
+                                     self.ly[i] - sp.height // 2))
         return img
 
 
@@ -523,23 +839,27 @@ class Panel:
     """Ayarlar paneli: cizim ve tiklanabilir bolgeler (panel penceresine gore).
 
     Degismeyen kisim (zemin, baslik, satir yazilari) bir kez ciziliyor;
-    anahtarlar, kaydirici ve uzerine gelme vurgusu her seferinde ustune
-    ekleniyor - fare gezerken yeniden cizim hafif kalsin.
+    secimler, anahtarlar, kaydirici ve uzerine gelme vurgusu her seferinde
+    ustune ekleniyor - fare gezerken yeniden cizim hafif kalsin.
     """
 
-    ROWS = (("topmost", "Her zaman üstte"),
-            ("pulse", "Nabız animasyonu"),
-            ("lock", "Konumu kilitle"),
-            ("label", "Durum yazısını göster"))
+    ROWS = (("design", "Tasarım", "seg"),
+            ("theme", "Tema", "seg"),
+            ("size", "Boyut", "slider"),
+            ("topmost", "Her zaman üstte", "toggle"),
+            ("pulse", "Nabız animasyonu", "toggle"),
+            ("lock", "Konumu kilitle", "toggle"),
+            ("label", "Durum yazısını göster", "toggle"))
 
-    def __init__(self, scale):
+    def __init__(self, scale, st):
         self.scale = scale
+        self.st = st
         s = self.s
-        self.m = max(2, s(2))                  # anahtar renk icin kenar payi
+        self.m = s(PANEL_SHADOW)
         self.w = s(PANEL_W)
         self.pad = s(PANEL_PAD)
         self.head, self.row, self.foot = s(PANEL_HEAD), s(PANEL_ROW), s(PANEL_FOOT)
-        self.h = self.head + self.row * (1 + len(self.ROWS)) + self.foot
+        self.h = self.head + self.row * len(self.ROWS) + self.foot
         self.iw, self.ih = self.w + 2 * self.m, self.h + 2 * self.m
 
         self.f_title = load_font(UIB_FONT, s(12.5))
@@ -548,43 +868,52 @@ class Panel:
         self.icon_px = s(9)
 
         m, w = self.m, self.w
-        self.row_cy = [m + self.head + i * self.row + self.row // 2
-                       for i in range(1 + len(self.ROWS))]
+        self.row_cy = {key: m + self.head + i * self.row + self.row // 2
+                       for i, (key, _, _) in enumerate(self.ROWS)}
         self.foot_y = m + self.h - self.foot
+        right = m + w - self.pad
 
         # boyut kaydiricisi: sagda yuzde, solunda kanal
         self.knob_r = s(6.5)
         self.slider_w = s(92)
         self.slider_h = s(16)
-        right = m + w - self.pad - s(34) - s(6)
-        self.slider_x = right - self.slider_w
+        self.slider_x = right - s(34) - s(6) - self.slider_w
         # topuzun merkezinin gidebildigi aralik (pencere koordinati)
         self.track = (self.slider_x + self.knob_r,
                       self.slider_x + self.slider_w - self.knob_r)
 
-        self.close_c = (m + w - self.pad - s(5), m + self.head // 2 + s(1))
+        # iki secenekli secimler (tasarim, tema)
+        self.seg_w, self.seg_h = s(132), s(22)
+        self.seg_x = right - self.seg_w
+
+        self.close_c = (right - s(5), m + self.head // 2 + s(1))
         reset_w = int(self.f_small.getlength("Varsayılana dön"))
 
         hit = s(12)
         self.regions = [
             ("close", (self.close_c[0] - hit, self.close_c[1] - hit,
                        self.close_c[0] + hit, self.close_c[1] + hit)),
-            ("slider", (self.slider_x - s(4), self.row_cy[0] - self.row // 2,
+            ("slider", (self.slider_x - s(4), self.row_cy["size"] - self.row // 2,
                         self.slider_x + self.slider_w + s(4),
-                        self.row_cy[0] + self.row // 2)),
+                        self.row_cy["size"] + self.row // 2)),
             ("reset", (m + self.pad - s(6), self.foot_y,
                        m + self.pad + reset_w + s(6), m + self.h)),
         ]
-        for (key, _), cy in zip(self.ROWS, self.row_cy[1:]):
-            self.regions.append(("row:" + key, (m + s(6), cy - self.row // 2,
-                                                m + w - s(6), cy + self.row // 2)))
+        for key, _, kind in self.ROWS:
+            cy = self.row_cy[key]
+            if kind == "seg":
+                for value, (x0, x1) in self.seg_boxes(key):
+                    self.regions.append(("seg:%s:%s" % (key, value),
+                                         (x0, cy - self.seg_h // 2, x1, cy + self.seg_h // 2)))
+            elif kind == "toggle":
+                self.regions.append(("row:" + key, (m + s(6), cy - self.row // 2,
+                                                    m + w - s(6), cy + self.row // 2)))
 
-        self._base = self._build_base()
         self._toggles = {on: self._toggle(on) for on in (True, False)}
         rw, rh = w - 2 * s(6), self.row - s(4)
-        self._row_glow = Image.new("RGBA", (rw, rh), (255, 255, 255, 0))
-        self._row_glow.putalpha(ss_mask(rw, rh, lambda d, k: d.rounded_rectangle(
-            [0, 0, rw * k - 1, rh * k - 1], radius=s(7) * k, fill=12)))
+        self._row_glow = colored((rw, rh), st["hover"], rounded(rw, rh, s(7)))
+        self.backdrop_version = None
+        self.set_backdrop(None)
 
     def s(self, v):
         return int(round(v * self.scale))
@@ -595,6 +924,11 @@ class Panel:
                 return name
         return None
 
+    def seg_boxes(self, key):
+        half = self.seg_w / 2.0
+        return [(value, (int(self.seg_x + i * half), int(self.seg_x + (i + 1) * half)))
+                for i, value in enumerate(CHOICES[key])]
+
     @staticmethod
     def frac(zoom):
         """Kaydirici logaritmik: her bolum ayni oranda buyutsun."""
@@ -604,87 +938,119 @@ class Panel:
     def zoom_at(frac):
         return ZOOM_MIN * (ZOOM_MAX / ZOOM_MIN) ** max(0.0, min(1.0, frac))
 
-    def _build_base(self):
-        s, m = self.s, self.m
-        body = material(self.w, self.h, s(12), (37, 39, 46), (22, 23, 28), 62)
-        img = Image.new("RGB", (self.iw, self.ih), KEY_RGB)
-        img.paste(body, (m, m), body)
-        d = ImageDraw.Draw(img)
-        d.text((m + self.pad, m + self.head // 2 + s(1)), "Ayarlar",
-               font=self.f_title, fill=TEXT_RGB, anchor="lm")
+    def set_backdrop(self, backdrop, version=None):
+        s, m, st = self.s, self.m, self.st
+        img = card(self.w, self.h, s(12), m, "panel", st, self.scale, backdrop)
+        stroke(img, st["text"], lambda d: d.text(
+            (m + self.pad, m + self.head // 2 + s(1)), "Ayarlar",
+            font=self.f_title, fill=255, anchor="lm"))
         lw = max(1, s(0.6))
-        for y in (m + self.head, self.foot_y):
-            d.line([(m + self.pad, y), (m + self.w - self.pad, y)],
-                   fill=LINE_RGB, width=lw)
-        labels = ["Boyut"] + [label for _, label in self.ROWS]
-        for label, cy in zip(labels, self.row_cy):
-            d.text((m + self.pad, cy), label, font=self.f_text, fill=TEXT_RGB,
-                   anchor="lm")
+        stroke(img, st["line"], lambda d: [
+            d.line([(m + self.pad, y), (m + self.w - self.pad, y)], fill=255, width=lw)
+            for y in (m + self.head, self.foot_y)])
+        stroke(img, st["text"], lambda d: [
+            d.text((m + self.pad, self.row_cy[key]), label, font=self.f_text,
+                   fill=255, anchor="lm") for key, label, _ in self.ROWS])
+        self._base = img
+        self.backdrop_version = version
+
+    def _pill(self, w, h, colors, edge=0):
+        img = clip(gradient(w, h, colors[0], colors[1]), rounded(w, h, h / 2.0))
+        if edge:
+            img.alpha_composite(colored((w, h), (255, 255, 255, edge),
+                                        rounded(w, h, h / 2.0, True)))
         return img
 
     def _toggle(self, on):
-        s = self.s
+        s, st = self.s, self.st
         w, h = s(28), s(16)
         if on:
-            t = material(w, h, h // 2, blend(ACCENT_RGB, (255, 255, 255), 0.08),
-                         blend(ACCENT_RGB, (0, 0, 0), 0.18), 40)
+            t = self._pill(w, h, (blend(ACCENT_RGB, (255, 255, 255), 0.08),
+                                  blend(ACCENT_RGB, (0, 0, 0), 0.18)), 40)
         else:
-            t = material(w, h, h // 2, (60, 63, 72), (44, 46, 54), 40)
+            t = self._pill(w, h, st["toggle_off"], 40 if st["theme"] == "dark" else 0)
         kr = h / 2.0 - s(2.5)
         kx = w - h / 2.0 if on else h / 2.0
-        knob = Image.new("RGBA", (w, h), (244, 245, 248, 0))
-        knob.putalpha(ss_mask(w, h, lambda d, k: d.ellipse(
-            [(kx - kr) * k, (h / 2.0 - kr) * k, (kx + kr) * k, (h / 2.0 + kr) * k],
-            fill=255)))
-        return Image.alpha_composite(t, knob)
+        knob = ss_mask(w, h, lambda d, k: d.ellipse(
+            [(kx - kr) * k, (h / 2.0 - kr) * k, (kx + kr) * k, (h / 2.0 + kr) * k], fill=255))
+        t.alpha_composite(colored((w, h), KNOB_RGB, knob))
+        if st["knob_ring"][3]:
+            ring = ss_mask(w, h, lambda d, k: d.ellipse(
+                [(kx - kr) * k, (h / 2.0 - kr) * k, (kx + kr) * k, (h / 2.0 + kr) * k],
+                outline=255, width=k))
+            t.alpha_composite(colored((w, h), st["knob_ring"], ring))
+        return t
 
     def _slider(self, frac):
-        w, h, kr = self.slider_w, self.slider_h, self.knob_r
+        w, h, kr, st = self.slider_w, self.slider_h, self.knob_r, self.st
         img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
         cy, th = h / 2.0, self.scale * 3.2
         x0, x1 = kr, w - kr
         kx = x0 + (x1 - x0) * max(0.0, min(1.0, frac))
 
-        def bar(xa, xb, color):
-            lay = Image.new("RGBA", (w, h), color + (0,))
-            lay.putalpha(ss_mask(w, h, lambda d, k: d.rounded_rectangle(
+        def bar(xa, xb):
+            return ss_mask(w, h, lambda d, k: d.rounded_rectangle(
                 [xa * k, (cy - th / 2) * k, xb * k, (cy + th / 2) * k],
-                radius=th / 2 * k, fill=255)))
-            img.alpha_composite(lay)
+                radius=th / 2 * k, fill=255))
 
-        bar(x0, x1, (60, 63, 72))
+        img.alpha_composite(colored((w, h), st["track"], bar(x0, x1)))
         if kx > x0 + 1:
-            bar(x0, kx, ACCENT_RGB)
-        knob = Image.new("RGBA", (w, h), (244, 245, 248, 0))
-        knob.putalpha(ss_mask(w, h, lambda d, k: d.ellipse(
-            [(kx - kr) * k, (cy - kr) * k, (kx + kr) * k, (cy + kr) * k], fill=255)))
-        img.alpha_composite(knob)
+            img.alpha_composite(colored((w, h), ACCENT_RGB, bar(x0, kx)))
+        knob = ss_mask(w, h, lambda d, k: d.ellipse(
+            [(kx - kr) * k, (cy - kr) * k, (kx + kr) * k, (cy + kr) * k], fill=255))
+        img.alpha_composite(colored((w, h), KNOB_RGB, knob))
+        if st["knob_ring"][3]:
+            ring = ss_mask(w, h, lambda d, k: d.ellipse(
+                [(kx - kr) * k, (cy - kr) * k, (kx + kr) * k, (cy + kr) * k],
+                outline=255, width=k))
+            img.alpha_composite(colored((w, h), st["knob_ring"], ring))
         return img
 
+    def _segments(self, img, key, current, hover):
+        s, st = self.s, self.st
+        cy = self.row_cy[key]
+        top = cy - self.seg_h // 2
+        img.alpha_composite(self._pill(self.seg_w, self.seg_h, st["seg_bg"]),
+                            (self.seg_x, top))
+        inset = s(2)
+        for value, (x0, x1) in self.seg_boxes(key):
+            on = value == current
+            if on:
+                pill = self._pill(x1 - x0 - 2 * inset, self.seg_h - 2 * inset,
+                                  st["seg_on"], 30 if st["theme"] == "dark" else 0)
+                img.alpha_composite(pill, (x0 + inset, top + inset))
+            name = "seg:%s:%s" % (key, value)
+            color = (st["seg_on_text"] if on else
+                     st["text"] if hover == name else st["muted"])
+            stroke(img, color, lambda d, x0=x0, x1=x1, value=value: d.text(
+                ((x0 + x1) / 2.0, cy), CHOICE_LABELS[value], font=self.f_small,
+                fill=255, anchor="mm"))
+
     def image(self, settings, zoom, hover):
-        s, m = self.s, self.m
+        s, m, st = self.s, self.m, self.st
         img = self._base.copy()
         if hover and hover.startswith("row:"):
-            key = hover[4:]
-            i = [k for k, _ in self.ROWS].index(key) + 1
             g = self._row_glow
-            img.paste(g, (m + s(6), self.row_cy[i] - g.height // 2), g)
+            img.alpha_composite(g, (m + s(6), self.row_cy[hover[4:]] - g.height // 2))
 
-        for (key, _), cy in zip(self.ROWS, self.row_cy[1:]):
-            t = self._toggles[bool(settings.get(key))]
-            img.paste(t, (m + self.w - self.pad - t.width, cy - t.height // 2), t)
+        for key, _, kind in self.ROWS:
+            cy = self.row_cy[key]
+            if kind == "seg":
+                self._segments(img, key, settings[key], hover)
+            elif kind == "toggle":
+                t = self._toggles[bool(settings[key])]
+                img.alpha_composite(t, (m + self.w - self.pad - t.width, cy - t.height // 2))
 
         sl = self._slider(self.frac(zoom))
-        img.paste(sl, (self.slider_x, self.row_cy[0] - sl.height // 2), sl)
-
-        d = ImageDraw.Draw(img)
-        d.text((m + self.w - self.pad, self.row_cy[0]), "%d%%" % round(zoom * 100),
-               font=self.f_small, fill=MUTED_RGB, anchor="rm")
-        d.text((m + self.pad, self.foot_y + self.foot // 2), "Varsayılana dön",
-               font=self.f_small, fill=TEXT_RGB if hover == "reset" else MUTED_RGB,
-               anchor="lm")
+        img.alpha_composite(sl, (self.slider_x, self.row_cy["size"] - sl.height // 2))
+        stroke(img, st["muted"], lambda d: d.text(
+            (m + self.w - self.pad, self.row_cy["size"]), "%d%%" % round(zoom * 100),
+            font=self.f_small, fill=255, anchor="rm"))
+        stroke(img, st["text"] if hover == "reset" else st["muted"], lambda d: d.text(
+            (m + self.pad, self.foot_y + self.foot // 2), "Varsayılana dön",
+            font=self.f_small, fill=255, anchor="lm"))
         draw_icon(img, self.close_c[0], self.close_c[1], CLOSE_GLYPH, self.icon_px,
-                  TEXT_RGB if hover == "close" else MUTED_RGB)
+                  st["text"] if hover == "close" else st["muted"])
         return img
 
 
@@ -692,27 +1058,19 @@ class HUD:
     def __init__(self):
         enable_dpi_awareness()
         self.root = tk.Tk()
-        self.root.withdraw()
-        self.root.overrideredirect(True)
-        self.root.configure(bg=KEY_HEX)
-
         self.dpi = max(1.0, min(2.5, self.root.winfo_fpixels("1i") / 96.0))
-        self.root.attributes("-transparentcolor", KEY_HEX)
-
         self.settings = read_settings()
-        self.root.attributes("-topmost", self.settings["topmost"])
+        self.style = STYLES[(self.settings["design"], self.settings["theme"])]
+        self.light = Layer(self.root, self.settings["topmost"])
 
         self.state, self.label = read_state()
         # her lambanin 0..1 arasi sonme/yanma seviyesi
         self.fade = [1.0 if STATES[self.state]["idx"] == i else 0.0 for i in range(3)]
-        self._photo = None
         self._sig = None
         self._steps = None
         self._t0 = time.perf_counter()
 
-        # Pencerelerin konumu burada tutuluyor; winfo_x/y geometri
-        # degisiminden hemen sonra eski degeri dondurdugu icin ona
-        # guvenilmiyor.
+        # Pencerelerin konumu burada tutuluyor; Tk'ye sorulmuyor.
         self._xy = (0, 0)
         self._size = (0, 0)
         self.zoom = read_zoom()
@@ -720,6 +1078,7 @@ class HUD:
         self.renderer = None
         self._pending_zoom = None
         self._zoom_job = None
+        self._move_job = None
         self._anchor = None
 
         # tasima ve boyutlandirma
@@ -727,11 +1086,12 @@ class HUD:
         self._grab_off = 0
         self._resizing = False
 
-        # alttaki tutamac (ayirici + disli)
+        # alttaki tutamac (ok + disli)
         self.chip = None
         self._chip_on = False
         self._chip_xy = (0, 0)
         self._chip_size = (0, 0)
+        self._chip_key = None
         self._grip_dragging = False
         self._gear_down = False
         self._near_at = None
@@ -743,8 +1103,8 @@ class HUD:
         self._cap_xy = (0, 0)
         self._cap_size = (0, 0)
         self._cap_margin = 0
+        self._cap_spec = None
         self._cap_key = None
-        self._cap_cache = {}
 
         # ayarlar paneli
         self.panel = None
@@ -755,42 +1115,56 @@ class HUD:
         self._panel_hover = None
         self._slider_drag = False
         self._track_x = (0, 1)
+        self._panel_key = None
 
-        self.view = tk.Label(self.root, bd=0, highlightthickness=0, bg=KEY_HEX)
-        self.view.pack()
+        # sivi cam: her pencerenin arkasindaki son goruntu
+        self._backdrops = {}
 
         w, h = self._build_size()
         self._size = (w, h)
-        self._place(w, h)
+        self._place(w)
+        self.light.exclude_from_capture(self.glass)
         self._bind()
-        self.root.deiconify()
         if self.settings["label"]:
             self._show_caption()
         self.poll()
         self.animate()
+        self._backdrop_tick()
+
+    @property
+    def glass(self):
+        return self.style["design"] == "glass"
 
     # ---------- yardimci pencereler ----------
 
     def _make_layer(self, topmost):
-        """Cercevesiz, seffaf anahtarli, isigin yaninda duran ek pencere."""
-        win = tk.Toplevel(self.root)
-        win.withdraw()
-        win.overrideredirect(True)
-        win.attributes("-topmost", topmost)
-        win.configure(bg=KEY_HEX)
-        win.attributes("-transparentcolor", KEY_HEX)
-        view = tk.Label(win, bd=0, highlightthickness=0, bg=KEY_HEX)
-        view.pack()
-        return win, view
+        layer = Layer(tk.Toplevel(self.root), topmost)
+        layer.exclude_from_capture(self.glass)
+        return layer
 
     def _lpad(self, zoom=None):
-        """Isik penceresinin govde etrafindaki seffaf kenar payi."""
+        """Isik penceresinin govde etrafindaki saydam kenar payi."""
         return int(round(MARGIN * self.dpi * (self.zoom if zoom is None else zoom)))
 
     def _cluster_half(self):
         """Isik + (varsa) altindaki yazi: yarim genislik."""
         cap_w = self._cap_size[0] if self._cap_on else 0
         return max(self._size[0], cap_w) / 2.0
+
+    def _backdrop(self, name, x, y, w, h):
+        """Bir govdenin arkasindaki masaustu, bulanik. Kenar kirilmasi icin
+        biraz genis okunuyor. Degismediyse onceki sonuc ve surumu doner."""
+        e = int(round(BACKDROP_EDGE * self.dpi))
+        rect = (x - e, y - e, w + 2 * e, h + 2 * e)
+        raw = capture(*rect)
+        digest = hash(raw.tobytes())
+        prev = self._backdrops.get(name)
+        if prev is not None and prev[0] == rect and prev[1] == digest:
+            return prev[2], prev[3]
+        img = raw.filter(ImageFilter.GaussianBlur(self.style["blur"] * self.dpi))
+        version = prev[3] + 1 if prev is not None else 1
+        self._backdrops[name] = (rect, digest, img, version)
+        return img, version
 
     def _layout(self):
         """Yazi, tutamac ve paneli isigin kayitli konum/olcusune gore dizer."""
@@ -805,13 +1179,12 @@ class HUD:
             cw, ch = self._cap_size
             m = self._cap_margin
             sc = self.dpi * self.zoom
-            # Iki pencerenin seffaf kenar paylari ust uste biniyor; gorunen
+            # Iki pencerenin saydam kenar paylari ust uste biniyor; gorunen
             # aralik govdeyle plaka arasinda tam CAP_GAP kadar.
-            cap_x = int(round(cx - cw / 2.0))
-            cap_y = y + h - self._lpad() + int(round(CAP_GAP * sc)) - m
-            self._cap_xy = (cap_x, cap_y)
-            self.cap.geometry(f"{cw}x{ch}+{cap_x}+{cap_y}")
-            bottom = cap_y + ch
+            self._cap_xy = (int(round(cx - cw / 2.0)),
+                            y + h - self._lpad() + int(round(CAP_GAP * sc)) - m)
+            self._render_caption()
+            bottom = self._cap_xy[1] + ch
 
         if self._chip_on:
             _, pad, cw, chh, _ = self._chip_metrics()
@@ -821,46 +1194,56 @@ class HUD:
             gy = bottom + gap - pad
             if gy + bh > sh - 4:                  # asagi sigmiyorsa ustte goster
                 gy = y - bh - gap + pad
-            gx = max(2, min(sw - bw - 2, gx))
-            gy = max(2, gy)
-            self._chip_xy = (gx, gy)
+            self._chip_xy = (max(2, min(sw - bw - 2, gx)), max(2, gy))
             self._chip_size = (bw, bh)
-            self.chip.geometry(f"{bw}x{bh}+{gx}+{gy}")
+            self._render_chip()
 
         if self._panel_open:
             self._place_panel()
-        self._commit()
+            self._render_panel()
 
-    def _commit(self):
-        # Tk pencere tasimalarini bosta uygular. Araya bir lift() girerse
-        # Windows pencerenin ESKI konumunu bildiriyor ve bekleyen tasima
-        # kayboluyordu (panel yerinde kalip tiklamalar 19 px kayiyordu).
-        # Konumlari hemen uygulatip ondan sonra one aliyoruz.
-        self.root.update_idletasks()
+    # ---------- isik ----------
 
-    # ---------- alttaki tutamac: ayirici + disli ----------
+    def _refresh_light_glass(self):
+        """Camda isigin arkasini yeniden oku; degistiyse True."""
+        if not self.glass:
+            return False
+        r = self.renderer
+        x, y = self._xy
+        bd, version = self._backdrop("light", x + r.pad, y + r.pad, r.bw, r.bh)
+        if version == r.backdrop_version:
+            return False
+        r.set_backdrop(bd, version)
+        return True
+
+    def _paint(self):
+        if self._steps is None:
+            return
+        self._sig = self._steps
+        self.light.show(self.renderer.frame(self._steps), *self._xy)
+
+    # ---------- alttaki tutamac: ok + disli ----------
 
     def _chip_metrics(self):
         s = self.dpi
         return (s, int(round(5 * s)), int(round(CHIP_W * s)),
                 int(round(CHIP_H * s)), int(round(CHIP_SPLIT * s)))
 
-    def _chip_image(self, grip_hot, gear_hot):
+    def _chip_image(self, grip_hot, gear_hot, backdrop):
+        st = self.style
         s, pad, w, h, split = self._chip_metrics()
-        chip = material(w, h, h // 2, CHIP_TOP, CHIP_BOTTOM, 62)
-        if gear_hot:                           # panel acikken disli kismi aydinlik
-            lit = Image.new("L", (w, h), 0)
-            ImageDraw.Draw(lit).rectangle([split, 0, w, h], fill=26)
-            glow = Image.new("RGBA", (w, h), (255, 255, 255, 0))
-            glow.putalpha(ImageChops.multiply(lit, chip.getchannel("A")))
-            chip = Image.alpha_composite(chip, glow)
-
-        img = Image.new("RGB", (w + 2 * pad, h + 2 * pad), KEY_RGB)
-        img.paste(chip, (pad, pad), chip)
-        d = ImageDraw.Draw(img)
-        d.line([(pad + split, pad + int(round(3 * s))),
-                (pad + split, pad + h - int(round(3 * s)))],
-               fill=(70, 73, 84), width=max(1, int(round(0.6 * s))))
+        img = card(w, h, h / 2.0, pad, "chip", st, s, backdrop)
+        if gear_hot:                           # panel acikken disli kismi vurgulu
+            lit = Image.new("L", img.size, 0)
+            ImageDraw.Draw(lit).rectangle([pad + split, pad, pad + w, pad + h], fill=255)
+            body = Image.new("L", img.size, 0)
+            body.paste(rounded(w, h, h / 2.0), (pad, pad))
+            img.alpha_composite(colored(img.size, st["press"],
+                                        ImageChops.multiply(lit, body)))
+        stroke(img, st["divider"], lambda d: d.line(
+            [(pad + split, pad + int(round(3 * s))),
+             (pad + split, pad + h - int(round(3 * s)))],
+            fill=255, width=max(1, int(round(0.6 * s)))))
 
         # Dikey cift yonlu ok: buranin boyut icin oldugunu anlatiyor (Windows'un
         # dikey boyutlandirma imleciyle ayni isaret). Suruklerken yanan
@@ -876,53 +1259,62 @@ class HUD:
             dd.rectangle([(cx - sw) * k, (cy - a + hh - 0.3 * s) * k,
                           (cx + sw) * k, (cy + a - hh + 0.3 * s) * k], fill=255)
 
-        color = STATES[self.state]["rgb"] if grip_hot else CHIP_ARROW_RGB
-        lay = Image.new("RGBA", (iw, ih), color + (0,))
-        lay.putalpha(ss_mask(iw, ih, arrow).point(
-            lambda v: v * (255 if grip_hot else 215) // 255))
-        img.paste(lay, (0, 0), lay)
+        color = STATES[self.state]["rgb"] if grip_hot else st["glyph"]
+        img.alpha_composite(colored((iw, ih), color, ss_mask(iw, ih, arrow).point(
+            lambda v: v * (255 if grip_hot else 215) // 255)))
 
         draw_icon(img, pad + split + (w - split) / 2.0, cy + 0.3 * s, GEAR_GLYPH,
-                  int(round(8.5 * s)), TEXT_RGB if gear_hot else CHIP_GEAR_RGB)
+                  int(round(8.5 * s)), st["text"] if gear_hot else st["gear"])
         return img
 
-    def _draw_chip(self):
-        self._chip_photo = ImageTk.PhotoImage(self._chip_image(
-            self._grip_dragging, self._panel_open or self._gear_down))
-        self.chip_view.configure(image=self._chip_photo)
+    def _render_chip(self):
+        if not self._chip_on:
+            return
+        grip_hot = self._grip_dragging
+        gear_hot = self._panel_open or self._gear_down
+        bd, version = None, None
+        if self.glass:
+            _, pad, w, h, _ = self._chip_metrics()
+            bd, version = self._backdrop("chip", self._chip_xy[0] + pad,
+                                         self._chip_xy[1] + pad, w, h)
+        key = (grip_hot, gear_hot, self.state if grip_hot else None,
+               id(self.style), version)
+        if key != self._chip_key:
+            self._chip_img = self._chip_image(grip_hot, gear_hot, bd)
+            self._chip_key = key
+        self.chip.show(self._chip_img, *self._chip_xy)
 
     def _show_chip(self):
         if self.chip is None:
-            self.chip, self.chip_view = self._make_layer(topmost=True)
-            self.chip_view.bind("<Button-1>", self._chip_press)
-            self.chip_view.bind("<B1-Motion>", self._chip_move)
-            self.chip_view.bind("<ButtonRelease-1>", self._chip_release)
-            self.chip_view.bind("<Motion>", self._chip_cursor)
+            self.chip = self._make_layer(topmost=True)
+            win = self.chip.win
+            win.bind("<Button-1>", self._chip_press)
+            win.bind("<B1-Motion>", self._chip_move)
+            win.bind("<ButtonRelease-1>", self._chip_release)
+            win.bind("<Motion>", self._chip_cursor)
         self._chip_on = True
-        self._draw_chip()
         self._layout()
-        self.chip.deiconify()
-        self.chip.lift()
+        self.chip.win.lift()
         self._away_at = None
 
     def _hide_chip(self):
         self._chip_on = False
         self._near_at = self._away_at = None
         if self.chip is not None:
-            self.chip.withdraw()
+            self.chip.hide()
 
     def _chip_cursor(self, e):
         # Imlec de anlatsin: okun uzerinde dikey boyutlandirma, dislide el.
         _, pad, _, _, split = self._chip_metrics()
         cursor = "hand2" if e.x >= pad + split else "sb_v_double_arrow"
-        if self.chip_view.cget("cursor") != cursor:
-            self.chip_view.configure(cursor=cursor)
+        if self.chip.win.cget("cursor") != cursor:
+            self.chip.win.configure(cursor=cursor)
 
     def _chip_press(self, e):
         _, pad, _, _, split = self._chip_metrics()
         if e.x >= pad + split:                 # sag yari: disli
             self._gear_down = True
-            self._draw_chip()
+            self._render_chip()
             return
         # Sol yari: gercek bir ayirici gibi govdenin ust kenari yerinde
         # kalir, alt kenari imleci birebir izler.
@@ -933,7 +1325,7 @@ class HUD:
         self._anchor = ("top", x + w / 2.0, y + lpad)
         self._grab_off = e.y_root - (y + h - lpad)
         self._away_at = None
-        self._draw_chip()
+        self._render_chip()
 
     def _chip_move(self, e):
         if not self._grip_dragging:
@@ -949,7 +1341,7 @@ class HUD:
             if pad + split <= e.x <= pad + w + pad and 0 <= e.y <= h + 2 * pad:
                 self._toggle_panel()
             else:
-                self._draw_chip()
+                self._render_chip()
             return
         if self._grip_dragging:
             # Bekleyen son boyut, capa birakilmadan once uygulanmali; yoksa
@@ -959,9 +1351,7 @@ class HUD:
             self._anchor = None
             self._save_zoom()
             self._save_pos()
-            if self._chip_on:
-                self._draw_chip()
-                self._layout()
+            self._layout()
 
     # ---------- durum yazisi ----------
 
@@ -971,57 +1361,52 @@ class HUD:
             text = text[:CAP_MAX_CHARS - 1].rstrip() + "…"
         return text
 
-    def _caption_image(self, text, px):
-        font = load_font(UIB_FONT, px)
-        tw = int(math.ceil(font.getlength(text)))
-        padx = int(round(px * 0.85))
-        h = int(round(px * 1.85))
-        m = max(2, int(round(px * 0.2)))
-        w = tw + 2 * padx
-        body = material(w, h, h // 2, (40, 42, 50), (22, 23, 28), 60)
-        img = Image.new("RGB", (w + 2 * m, h + 2 * m), KEY_RGB)
-        img.paste(body, (m, m), body)
-        ImageDraw.Draw(img).text((m + w / 2.0, m + h / 2.0), text, font=font,
-                                 fill=TEXT_RGB, anchor="mm")
-        return img, m
-
-    def _render_caption(self):
+    def _measure_caption(self):
+        """Yazi plakasinin olcusu - konumu hesaplamak icin cizmeden once."""
         text = self._caption_text()
         px = max(CAP_MIN_PX, int(round(CAP_PX * self.dpi * self.zoom)))
-        key = (text, px)
-        if key == self._cap_key:
-            return
-        got = self._cap_cache.get(key)
-        if got is None:
-            got = self._caption_image(text, px)
-            if len(self._cap_cache) > 24:
-                self._cap_cache.clear()
-            self._cap_cache[key] = got
-        img, m = got
-        self._cap_photo = ImageTk.PhotoImage(img)
-        self.cap_view.configure(image=self._cap_photo)
-        self._cap_size = img.size
+        font = load_font(UIB_FONT, px)
+        w = int(math.ceil(font.getlength(text))) + 2 * int(round(px * 0.85))
+        h = int(round(px * 1.85))
+        m = max(3, int(round(px * 0.5)))       # golge payi
+        self._cap_spec = (text, px, w, h, m)
+        self._cap_size = (w + 2 * m, h + 2 * m)
         self._cap_margin = m
-        self._cap_key = key
+
+    def _render_caption(self):
+        text, px, w, h, m = self._cap_spec
+        bd, version = None, None
+        if self.glass:
+            bd, version = self._backdrop("cap", self._cap_xy[0] + m,
+                                         self._cap_xy[1] + m, w, h)
+        key = (self._cap_spec, id(self.style), version)
+        if key != self._cap_key:
+            img = card(w, h, h / 2.0, m, "plate", self.style, self.dpi * self.zoom, bd)
+            font = load_font(UIB_FONT, px)
+            stroke(img, self.style["text"], lambda d: d.text(
+                (m + w / 2.0, m + h / 2.0), text, font=font, fill=255, anchor="mm"))
+            self._cap_img = img
+            self._cap_key = key
+        self.cap.show(self._cap_img, *self._cap_xy)
 
     def _show_caption(self):
         if self.cap is None:
-            self.cap, self.cap_view = self._make_layer(self.settings["topmost"])
+            self.cap = self._make_layer(self.settings["topmost"])
             # yazi isigin parcasi: ondan da tasinip menu acilabilsin
-            self.cap_view.bind("<Button-1>", self._grab)
-            self.cap_view.bind("<B1-Motion>", self._drag)
-            self.cap_view.bind("<ButtonRelease-1>", self._release)
-            self.cap_view.bind("<Button-3>", self._popup)
-            self.cap_view.bind("<MouseWheel>", self._wheel)
+            win = self.cap.win
+            win.bind("<Button-1>", self._grab)
+            win.bind("<B1-Motion>", self._drag)
+            win.bind("<ButtonRelease-1>", self._release)
+            win.bind("<Button-3>", self._popup)
+            win.bind("<MouseWheel>", self._wheel)
         self._cap_on = True
-        self._render_caption()
+        self._measure_caption()
         self._layout()
-        self.cap.deiconify()
 
     def _hide_caption(self):
         self._cap_on = False
         if self.cap is not None:
-            self.cap.withdraw()
+            self.cap.hide()
 
     # ---------- ayarlar paneli ----------
 
@@ -1033,13 +1418,15 @@ class HUD:
 
     def _open_panel(self):
         if self.panel is None:
-            self.panel, self.panel_view = self._make_layer(topmost=True)
-            self.panel_view.bind("<Button-1>", self._panel_press)
-            self.panel_view.bind("<B1-Motion>", self._panel_drag)
-            self.panel_view.bind("<ButtonRelease-1>", self._panel_release)
-            self.panel_view.bind("<Motion>", self._panel_motion)
-            self.panel_view.bind("<Leave>", lambda e: self._set_hover(None))
-            self._panel = Panel(self.dpi)
+            self.panel = self._make_layer(topmost=True)
+            win = self.panel.win
+            win.bind("<Button-1>", self._panel_press)
+            win.bind("<B1-Motion>", self._panel_drag)
+            win.bind("<ButtonRelease-1>", self._panel_release)
+            win.bind("<Motion>", self._panel_motion)
+            win.bind("<Leave>", lambda e: self._set_hover(None))
+        if self._panel is None:
+            self._panel = Panel(self.dpi, self.style)
         if not self._panel_open:
             # Saga sigiyorsa sag, yoksa sol. Panel acik kaldikca taraf sabit.
             x, _ = self._xy
@@ -1049,29 +1436,34 @@ class HUD:
             self._panel_side = "right" if fits else "left"
             self._panel_hover = None
         self._panel_open = True
-        self._draw_panel()
         self._place_panel()
-        self._commit()
-        self.panel.deiconify()
-        self.panel.lift()
-        if self._chip_on:
-            self._draw_chip()
+        self._render_panel()
+        self.panel.win.lift()
+        self._render_chip()
 
     def _close_panel(self):
         self._panel_open = False
         self._panel_hover = None
         self._slider_drag = False
         if self.panel is not None:
-            self.panel.withdraw()
-        if self._chip_on:
-            self._draw_chip()
+            self.panel.hide()
+        self._render_chip()
 
-    def _draw_panel(self):
+    def _render_panel(self):
         if not self._panel_open:
             return
-        img = self._panel.image(self.settings, self.zoom, self._panel_hover)
-        self._panel_photo = ImageTk.PhotoImage(img)
-        self.panel_view.configure(image=self._panel_photo)
+        p = self._panel
+        if self.glass:
+            bd, version = self._backdrop("panel", self._panel_xy[0] + p.m,
+                                         self._panel_xy[1] + p.m, p.w, p.h)
+            if version != p.backdrop_version:
+                p.set_backdrop(bd, version)
+        key = (p, tuple(sorted(self.settings.items())), round(self.zoom, 4),
+               self._panel_hover, p.backdrop_version)
+        if key != self._panel_key:
+            self._panel_img = p.image(self.settings, self.zoom, self._panel_hover)
+            self._panel_key = key
+        self.panel.show(self._panel_img, *self._panel_xy)
 
     def _place_panel(self):
         x, y = self._xy
@@ -1095,15 +1487,13 @@ class HUD:
         else:
             px = int(round(left - gap - p.w - p.m))
         py = y + self._lpad() - p.m            # panelin ustu govdenin ustuyle hizali
-        px = max(2, min(sw - p.iw - 2, px))
-        py = max(2, min(sh - p.ih - 2, py))
-        self._panel_xy = (px, py)
-        self.panel.geometry(f"{p.iw}x{p.ih}+{px}+{py}")
+        self._panel_xy = (max(2 - p.m, min(sw - p.iw + p.m - 2, px)),
+                          max(2 - p.m, min(sh - p.ih + p.m - 2, py)))
 
     def _set_hover(self, region):
         if region != self._panel_hover:
             self._panel_hover = region
-            self._draw_panel()
+            self._render_panel()
 
     def _panel_motion(self, e):
         self._set_hover(self._panel.hit(e.x, e.y))
@@ -1123,6 +1513,9 @@ class HUD:
             self._close_panel()
         elif region == "reset":
             self._reset_settings()
+        elif region and region.startswith("seg:"):
+            _, key, value = region.split(":")
+            self._choose(key, value)
         elif region and region.startswith("row:"):
             self._toggle_setting(region[4:])
 
@@ -1138,7 +1531,6 @@ class HUD:
             self._save_zoom()
             self._save_pos()
             self._layout()
-            self._draw_panel()
 
     def _panel_anchor(self):
         x, y = self._xy
@@ -1153,23 +1545,45 @@ class HUD:
         x0, x1 = self._track_x
         self._request_zoom(Panel.zoom_at((x_root - x0) / float(max(1, x1 - x0))))
 
+    def _choose(self, key, value):
+        if self.settings[key] == value:
+            return
+        self.settings[key] = value
+        save_settings(self.settings)
+        self._apply_style()
+
+    def _apply_style(self):
+        """Tasarim ya da tema degisti: her seyi yeni gorunumle ciz."""
+        self.style = STYLES[(self.settings["design"], self.settings["theme"])]
+        for layer in (self.light, self.chip, self.cap, self.panel):
+            if layer is not None:
+                layer.exclude_from_capture(self.glass)
+        self._renderers.clear()
+        self._backdrops.clear()
+        self._chip_key = self._cap_key = None
+        self._build_size()
+        self._refresh_light_glass()
+        self._paint()
+        if self._panel is not None:
+            self._panel = Panel(self.dpi, self.style)
+        self._layout()
+
     def _toggle_setting(self, key):
         self.settings[key] = not self.settings[key]
         save_settings(self.settings)
         self._apply_setting(key)
-        self._draw_panel()
+        self._render_panel()
 
     def _apply_setting(self, key):
         on = self.settings[key]
         if key == "topmost":
             self.root.attributes("-topmost", on)
             if self.cap is not None:
-                self.cap.attributes("-topmost", on)
+                self.cap.win.attributes("-topmost", on)
             # tutamac ve panel her zaman ustte; isigin altinda kalmasinlar
-            self._commit()
-            for win in (self.chip, self.panel):
-                if win is not None:
-                    win.lift()
+            for layer in (self.chip, self.panel):
+                if layer is not None:
+                    layer.win.lift()
         elif key == "label":
             if on:
                 self._show_caption()
@@ -1182,8 +1596,10 @@ class HUD:
         old = dict(self.settings)
         self.settings = dict(DEFAULT_SETTINGS)
         save_settings(self.settings)
-        for key, value in self.settings.items():
-            if value != old[key]:
+        if (old["design"], old["theme"]) != (self.settings["design"], self.settings["theme"]):
+            self._apply_style()
+        for key in ("topmost", "label"):
+            if self.settings[key] != old[key]:
                 self._apply_setting(key)
         if self._panel_open:
             self._anchor = self._panel_anchor()
@@ -1191,7 +1607,7 @@ class HUD:
         self._anchor = None
         self._save_zoom()
         self._save_pos()
-        self._draw_panel()
+        self._render_panel()
 
     # ---------- imlec izleme ----------
 
@@ -1257,7 +1673,7 @@ class HUD:
             self.set_zoom(z)
 
     def _build_size(self):
-        """Gecerli orana gore cizeri hazirlar, pencere olcusunu dondurur."""
+        """Gecerli orana ve gorunume gore cizeri hazirlar, olcusunu dondurur."""
         # Surekli boyutta sonsuz cizer olabilir; anahtar olarak pencerenin
         # piksel olcusu kullaniliyor (ayni olcu = ayni cizim) ve son
         # kullanilanlardan birkaci tutuluyor.
@@ -1265,7 +1681,7 @@ class HUD:
         key = window_size(scale)
         r = self._renderers.get(key)
         if r is None:
-            r = Renderer(scale)
+            r = Renderer(scale, self.style)
             if len(self._renderers) > 8:
                 self._renderers.clear()
             self._renderers[key] = r
@@ -1285,7 +1701,7 @@ class HUD:
         if window_size(self.dpi * z) == self._size:
             # Pencere ayni boyda kaliyor; yalnizca paneldeki yuzde guncellensin.
             self.zoom = z
-            self._draw_panel()
+            self._render_panel()
             return
 
         x, y = self._xy
@@ -1294,15 +1710,8 @@ class HUD:
         self.zoom = z
         w, h = self._build_size()
         self._size = (w, h)
-
-        # Yeni cizer = yeni boyutta resim. Her zaman yeniden ciziliyor;
-        # yalnizca lamba parlakligi degisince cizilirse sabit yanan kirmizida
-        # pencere buyurken icinde eski kucuk resim kaliyordu.
-        self._sig = None
-        if self._steps is not None:
-            self._paint(self._steps)
         if self._cap_on:
-            self._render_caption()
+            self._measure_caption()
 
         kind, ax, ay = anchor
         if kind == "center":
@@ -1317,18 +1726,13 @@ class HUD:
             nx, ny = cx - w / 2.0, ay - self._lpad()
         sw = self.root.winfo_screenwidth()
         sh = self.root.winfo_screenheight()
-        nx = max(-w + 24, min(sw - 24, int(round(nx))))
-        ny = max(-20, min(sh - 20, int(round(ny))))
-        self._xy = (nx, ny)
-        self.root.geometry(f"{w}x{h}+{nx}+{ny}")
+        self._xy = (max(-w + 24, min(sw - 24, int(round(nx)))),
+                    max(-20, min(sh - 20, int(round(ny)))))
 
-        # Yazi, tutamac ve panel isikla cakismayacak yerlere diziliyor;
-        # one almaya (lift) gerek yok - bkz. _commit.
+        # Yeni cizer = yeni boyutta resim; her zaman yeniden ciziliyor.
+        self._refresh_light_glass()
+        self._paint()
         self._layout()
-        self._draw_panel()
-        # Bekleyen cizimi hemen bosalt: pencere yeni boyuta gecerken icerik de
-        # ayni anda yenilensin, arada bos ya da eski bir kare gorunmesin.
-        self.root.update_idletasks()
         # Surukleme suruyorsa her adimda diske yazma; bitince bir kez yaz.
         if self._anchor is None:
             self._save_zoom()
@@ -1376,7 +1780,7 @@ class HUD:
 
     # ---------- pencere ----------
 
-    def _place(self, w, h):
+    def _place(self, w):
         sw = self.root.winfo_screenwidth()
         sh = self.root.winfo_screenheight()
         x, y = (sw - w) // 2, int(6 * self.dpi)
@@ -1388,23 +1792,24 @@ class HUD:
         except Exception:
             pass
         self._xy = (x, y)
-        self.root.geometry(f"{w}x{h}+{x}+{y}")
 
     def _bind(self):
-        self.view.bind("<Button-1>", self._grab)
-        self.view.bind("<B1-Motion>", self._drag)
-        self.view.bind("<ButtonRelease-1>", self._release)
-        self.view.bind("<Button-3>", self._popup)
+        # Kok pencereye baglanan olaylar menu gibi alt pencerelerden de
+        # geliyor; yalnizca isigin kendisinden gelenler isleniyor.
+        def own(handler):
+            return lambda e: handler(e) if e.widget is self.root else None
+
+        root = self.root
+        root.bind("<Button-1>", own(self._grab))
+        root.bind("<B1-Motion>", own(self._drag))
+        root.bind("<ButtonRelease-1>", own(self._release))
+        root.bind("<Button-3>", own(self._popup))
         # Ctrl'lu olaylar daha ozel oldugu icin yukaridakilerin onune geciyor
-        self.view.bind("<Control-Button-1>", self._resize_grab)
-        self.view.bind("<Control-B1-Motion>", self._resize_drag)
+        root.bind("<Control-Button-1>", own(self._resize_grab))
+        root.bind("<Control-B1-Motion>", own(self._resize_drag))
+        root.bind("<MouseWheel>", own(self._wheel))
 
-        # Tekerlek: buyut / kucult. Yalnizca isige baglaniyor - pencereye de
-        # baglayinca etiketin olayi iki kez geliyor, her tik iki kat
-        # buyutuyordu.
-        self.view.bind("<MouseWheel>", self._wheel)
-
-        self.menu = tk.Menu(self.root, tearoff=0, bd=0, relief="flat",
+        self.menu = tk.Menu(root, tearoff=0, bd=0, relief="flat",
                             bg="#1b1c20", fg="#e8e9ee",
                             activebackground="#2c2e36", activeforeground="#ffffff",
                             font=("Segoe UI", 9))
@@ -1418,7 +1823,7 @@ class HUD:
         self.menu.add_separator()
         self.menu.add_command(label="Ortala", command=self.center)
         self.menu.add_separator()
-        self.menu.add_command(label="Kapat", command=self.root.destroy)
+        self.menu.add_command(label="Kapat", command=root.destroy)
 
     def _popup(self, e):
         try:
@@ -1427,17 +1832,24 @@ class HUD:
             self.menu.grab_release()
 
     def _grab(self, e):
-        # imlecin pencereye gore yeri; tasima sirasinda ekran koordinati
-        # kullaniliyor ki gecikmeli winfo_x yuzunden isik titremesin
+        # imlecin pencereye gore yeri; tasima ekran koordinatiyla yapiliyor
         x, y = self._xy
         self._dx, self._dy = e.x_root - x, e.y_root - y
 
     def _drag(self, e):
         if self._resizing or self.settings["lock"]:
             return
-        x, y = e.x_root - self._dx, e.y_root - self._dy
-        self._xy = (x, y)
-        self.root.geometry(f"+{x}+{y}")
+        self._xy = (e.x_root - self._dx, e.y_root - self._dy)
+        # Fare olaylari cizimden hizli gelebiliyor; konum bosta bir kez uygulanir.
+        if self._move_job is None:
+            self._move_job = self.root.after_idle(self._flush_move)
+
+    def _flush_move(self):
+        self._move_job = None
+        if self._refresh_light_glass():
+            self._paint()
+        else:
+            self.light.move(*self._xy)
         self._layout()
 
     def _save_pos(self):
@@ -1448,11 +1860,9 @@ class HUD:
             pass
 
     def center(self):
-        x = (self.root.winfo_screenwidth() - self._size[0]) // 2
-        y = int(6 * self.dpi)
-        self._xy = (x, y)
-        self.root.geometry(f"+{x}+{y}")
-        self._layout()
+        self._xy = ((self.root.winfo_screenwidth() - self._size[0]) // 2,
+                    int(6 * self.dpi))
+        self._flush_move()
         self._save_pos()
 
     # ---------- dongu ----------
@@ -1461,13 +1871,23 @@ class HUD:
         state, label = read_state()
         if (state, label) != (self.state, self.label):
             self.state, self.label = state, label
-            if self._chip_on:
-                self._draw_chip()
+            self._render_chip()
             if self._cap_on:
-                self._render_caption()
+                self._measure_caption()
                 self._layout()
         self._track_pointer()
         self.root.after(POLL_MS, self.poll)
+
+    def _backdrop_tick(self):
+        # Sivi cam: arkadaki masaustu degistikce camlar da guncellensin.
+        if self.glass:
+            if self._refresh_light_glass():
+                self._paint()
+            if self._cap_on:
+                self._render_caption()
+            self._render_chip()
+            self._render_panel()
+        self.root.after(BACKDROP_MS, self._backdrop_tick)
 
     def animate(self):
         cfg = STATES[self.state]
@@ -1490,21 +1910,14 @@ class HUD:
             if abs(self.fade[i] - tgt) < 0.004:
                 self.fade[i] = tgt
 
-        steps = tuple(
+        self._steps = tuple(
             max(0, min(20, int(round(self.fade[i] *
                                      (intensity if i == active else 0.62) * 20))))
             for i in range(3))
-
-        self._steps = steps
-        if steps != self._sig:
-            self._paint(steps)
+        if self._steps != self._sig:
+            self._paint()
 
         self.root.after(FRAME_MS, self.animate)
-
-    def _paint(self, steps):
-        self._sig = steps
-        self._photo = ImageTk.PhotoImage(self.renderer.frame(steps))
-        self.view.configure(image=self._photo)
 
     def run(self):
         self.root.mainloop()
