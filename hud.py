@@ -22,9 +22,6 @@ acar. Boyut, konum ve ayarlar hatirlanir.
 Gercek bir sinyal diregindeki gibi ustte kirmizi, ortada sari, altta yesil
 lamba vardir. Yalnizca sirasi gelen yanar, otekiler sonuk cam gibi kalir;
 durum degisince eski lamba soner, yenisi yanar.
-
-Pillow yoksa sade bir tkinter surumune duser (ayarlar paneli, tutamac ve
-durum yazisi yalnizca Pillow ile var).
 """
 
 import os
@@ -32,21 +29,17 @@ import sys
 import json
 import math
 import time
+import ctypes
 import tempfile
 import tkinter as tk
+from ctypes import wintypes
 
-try:
-    from PIL import (Image, ImageChops, ImageDraw, ImageFilter, ImageFont,
-                     ImageTk)
-    HAVE_PIL = True
-except ImportError:
-    HAVE_PIL = False
+from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont, ImageTk
 
 STATE_FILE = os.path.join(tempfile.gettempdir(), "cc_hud_state.txt")
 POS_FILE = os.path.join(tempfile.gettempdir(), "cc_hud_pos.txt")
 ZOOM_FILE = os.path.join(tempfile.gettempdir(), "cc_hud_zoom.txt")
 SETTINGS_FILE = os.path.join(tempfile.gettempdir(), "cc_hud_settings.json")
-PID_FILE = os.path.join(tempfile.gettempdir(), "cc_hud.pid")
 
 POLL_MS = 150    # durum dosyasi okuma araligi
 FRAME_MS = 33    # ~30 fps animasyon
@@ -101,9 +94,13 @@ MUTED_RGB = (146, 150, 162)
 ACCENT_RGB = (52, 211, 153)
 LINE_RGB = (48, 50, 58)
 
-UI_FONTS = ("segoeui.ttf", "arial.ttf")
-UIB_FONTS = ("seguisb.ttf", "segoeuib.ttf", "segoeui.ttf", "arial.ttf")
-ICON_FONTS = ("SegoeIcons.ttf", "segmdl2.ttf")   # Win11 / Win10 simge yazisi
+FONTS_DIR = os.path.join(os.environ["WINDIR"], "Fonts")
+UI_FONT = "segoeui.ttf"
+UIB_FONT = "seguisb.ttf"        # Segoe UI Semibold
+# Simge yazisi: Windows 11'de Segoe Fluent Icons, Windows 10'da MDL2 Assets
+ICON_FONT = ("SegoeIcons.ttf"
+             if os.path.exists(os.path.join(FONTS_DIR, "SegoeIcons.ttf"))
+             else "segmdl2.ttf")
 GEAR_GLYPH = "\ue713"
 CLOSE_GLYPH = "\ue711"
 
@@ -190,26 +187,12 @@ def save_settings(settings):
 _FONTS = {}
 
 
-def find_font(names):
-    fonts_dir = os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts")
-    for name in names:
-        path = os.path.join(fonts_dir, name)
-        if os.path.exists(path):
-            return path
-    return None
-
-
-def load_font(names, px):
-    """Ilk bulunan yazi tipini istenen boyda verir (onbellekli)."""
-    key = (names, px)
+def load_font(name, px):
+    """Windows yazi tipini istenen boyda verir (onbellekli)."""
+    key = (name, px)
     font = _FONTS.get(key)
     if font is None:
-        path = find_font(names)
-        try:
-            font = ImageFont.truetype(path, px) if path else ImageFont.load_default()
-        except Exception:
-            font = ImageFont.load_default()
-        _FONTS[key] = font
+        font = _FONTS[key] = ImageFont.truetype(os.path.join(FONTS_DIR, name), px)
     return font
 
 
@@ -244,21 +227,9 @@ def material(w, h, r, top, bottom, edge):
 
 
 def draw_icon(img, cx, cy, glyph, px, color):
-    """Windows simge yazisindan bir simge; yazi yoksa basit bir cizim."""
-    d = ImageDraw.Draw(img)
-    if find_font(ICON_FONTS):
-        d.text((cx, cy), glyph, font=load_font(ICON_FONTS, px), fill=color,
-               anchor="mm")
-        return
-    r = px * 0.38
-    w = max(1, int(round(px * 0.13)))
-    if glyph == GEAR_GLYPH:
-        d.ellipse([cx - r, cy - r, cx + r, cy + r], outline=color, width=w)
-        d.ellipse([cx - r * 0.3, cy - r * 0.3, cx + r * 0.3, cy + r * 0.3],
-                  fill=color)
-    else:
-        d.line([cx - r, cy - r, cx + r, cy + r], fill=color, width=w)
-        d.line([cx - r, cy + r, cx + r, cy - r], fill=color, width=w)
+    """Windows simge yazisindan bir simge cizer."""
+    ImageDraw.Draw(img).text((cx, cy), glyph, font=load_font(ICON_FONT, px),
+                             fill=color, anchor="mm")
 
 
 def acquire_singleton():
@@ -268,47 +239,15 @@ def acquire_singleton():
     (ya da elle acma) ust uste pencere birakamaz. Kilit isletim sistemine
     ait oldugu icin surec cokse bile kendiliginden serbest kalir.
     """
-    if sys.platform == "win32":
-        import ctypes
-        from ctypes import wintypes
-        # use_last_error olmadan ctypes.get_last_error() hep 0 doner;
-        # o yuzden windll yerine acikca WinDLL kuruluyor.
-        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        k32.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL,
-                                     wintypes.LPCWSTR]
-        k32.CreateMutexW.restype = wintypes.HANDLE
-        handle = k32.CreateMutexW(None, True, "Local\\cc_hud_singleton")
-        if not handle or ctypes.get_last_error() == 183:   # ALREADY_EXISTS
-            return None
-        return handle
-
-    # diger platformlar: pid dosyasi yeter
-    try:
-        with open(PID_FILE, "r", encoding="utf-8") as f:
-            old = int(f.read().strip())
-        os.kill(old, 0)
-    except Exception:
-        return True          # dosya yok, bozuk ya da surec olmus
-    return None
-
-
-def write_pid():
-    """Calisan kopyanin pid'i - hangi pencerenin canli oldugu belli olsun."""
-    try:
-        with open(PID_FILE, "w", encoding="utf-8") as f:
-            f.write(str(os.getpid()))
-    except Exception:
-        pass
-
-
-def clear_pid():
-    try:
-        if os.path.exists(PID_FILE):
-            with open(PID_FILE, "r", encoding="utf-8") as f:
-                if int(f.read().strip()) == os.getpid():
-                    os.remove(PID_FILE)
-    except Exception:
-        pass
+    # use_last_error olmadan ctypes.get_last_error() hep 0 doner;
+    # o yuzden windll yerine acikca WinDLL kuruluyor.
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
+    k32.CreateMutexW.restype = wintypes.HANDLE
+    handle = k32.CreateMutexW(None, True, "Local\\cc_hud_singleton")
+    if not handle or ctypes.get_last_error() == 183:   # ALREADY_EXISTS
+        return None
+    return handle
 
 
 def read_zoom():
@@ -363,16 +302,7 @@ def blend(a, b, t):
 
 
 def enable_dpi_awareness():
-    if sys.platform != "win32":
-        return
-    import ctypes
-    try:
-        ctypes.windll.shcore.SetProcessDpiAwareness(2)   # per-monitor
-    except Exception:
-        try:
-            ctypes.windll.user32.SetProcessDPIAware()
-        except Exception:
-            pass
+    ctypes.windll.shcore.SetProcessDpiAwareness(2)   # monitor basina
 
 
 class Renderer:
@@ -614,9 +544,9 @@ class Panel:
         self.h = self.head + self.row * (1 + len(self.ROWS)) + self.foot
         self.iw, self.ih = self.w + 2 * self.m, self.h + 2 * self.m
 
-        self.f_title = load_font(UIB_FONTS, s(12.5))
-        self.f_text = load_font(UI_FONTS, s(11))
-        self.f_small = load_font(UI_FONTS, s(10.5))
+        self.f_title = load_font(UIB_FONT, s(12.5))
+        self.f_text = load_font(UI_FONT, s(11))
+        self.f_small = load_font(UI_FONT, s(10.5))
         self.icon_px = s(9)
 
         m, w = self.m, self.w
@@ -768,16 +698,8 @@ class HUD:
         self.root.overrideredirect(True)
         self.root.configure(bg=KEY_HEX)
 
-        try:
-            self.dpi = max(1.0, min(2.5, self.root.winfo_fpixels("1i") / 96.0))
-        except Exception:
-            self.dpi = 1.0
-
-        if HAVE_PIL and sys.platform == "win32":
-            try:
-                self.root.attributes("-transparentcolor", KEY_HEX)
-            except tk.TclError:
-                pass
+        self.dpi = max(1.0, min(2.5, self.root.winfo_fpixels("1i") / 96.0))
+        self.root.attributes("-transparentcolor", KEY_HEX)
 
         self.settings = read_settings()
         self.root.attributes("-topmost", self.settings["topmost"])
@@ -836,11 +758,7 @@ class HUD:
         self._slider_drag = False
         self._track_x = (0, 1)
 
-        if HAVE_PIL:
-            self.view = tk.Label(self.root, bd=0, highlightthickness=0, bg=KEY_HEX)
-        else:
-            self.view = tk.Canvas(self.root, bg="#1a1b20", highlightthickness=0)
-            self.f_lamps = []
+        self.view = tk.Label(self.root, bd=0, highlightthickness=0, bg=KEY_HEX)
         self.view.pack()
 
         w, h = self._build_size()
@@ -862,11 +780,7 @@ class HUD:
         win.overrideredirect(True)
         win.attributes("-topmost", topmost)
         win.configure(bg=KEY_HEX)
-        if sys.platform == "win32":
-            try:
-                win.attributes("-transparentcolor", KEY_HEX)
-            except tk.TclError:
-                pass
+        win.attributes("-transparentcolor", KEY_HEX)
         view = tk.Label(win, bd=0, highlightthickness=0, bg=KEY_HEX)
         view.pack()
         return win, view
@@ -977,8 +891,6 @@ class HUD:
         self.chip_view.configure(image=self._chip_photo)
 
     def _show_chip(self):
-        if not HAVE_PIL:
-            return
         if self.chip is None:
             self.chip, self.chip_view = self._make_layer(topmost=True)
             self.chip_view.bind("<Button-1>", self._chip_press)
@@ -1051,7 +963,7 @@ class HUD:
         return text
 
     def _caption_image(self, text, px):
-        font = load_font(UIB_FONTS, px)
+        font = load_font(UIB_FONT, px)
         tw = int(math.ceil(font.getlength(text)))
         padx = int(round(px * 0.85))
         h = int(round(px * 1.85))
@@ -1084,8 +996,6 @@ class HUD:
         self._cap_key = key
 
     def _show_caption(self):
-        if not HAVE_PIL:
-            return
         if self.cap is None:
             self.cap, self.cap_view = self._make_layer(self.settings["topmost"])
             # yazi isigin parcasi: ondan da tasinip menu acilabilsin
@@ -1093,8 +1003,7 @@ class HUD:
             self.cap_view.bind("<B1-Motion>", self._drag)
             self.cap_view.bind("<ButtonRelease-1>", self._release)
             self.cap_view.bind("<Button-3>", self._popup)
-            for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
-                self.cap_view.bind(seq, self._wheel)
+            self.cap_view.bind("<MouseWheel>", self._wheel)
         self._cap_on = True
         self._render_caption()
         self._layout()
@@ -1114,8 +1023,6 @@ class HUD:
             self._open_panel()
 
     def _open_panel(self):
-        if not HAVE_PIL:
-            return
         if self.panel is None:
             self.panel, self.panel_view = self._make_layer(topmost=True)
             self.panel_view.bind("<Button-1>", self._panel_press)
@@ -1214,7 +1121,7 @@ class HUD:
         if self._slider_drag:
             self._slider_to(e.x_root)
 
-    def _panel_release(self, _e=None):
+    def _panel_release(self, _e):
         if self._slider_drag:
             self._flush_zoom()
             self._slider_drag = False
@@ -1294,10 +1201,7 @@ class HUD:
         almiyor, ustte duruyor ve imlec sicrayarak gelebiliyor); bu yuzden
         karar dogrudan imlec konumuna bakilarak veriliyor.
         """
-        try:
-            px, py = self.root.winfo_pointerxy()
-        except tk.TclError:
-            return
+        px, py = self.root.winfo_pointerxy()
         now = time.perf_counter()
         near = (self._over(px, py, self._xy, self._size, 0) or
                 (self._cap_on and self._over(px, py, self._cap_xy, self._cap_size, 0)) or
@@ -1337,45 +1241,27 @@ class HUD:
 
     def _flush_zoom(self):
         if self._zoom_job is not None:
-            try:
-                self.root.after_cancel(self._zoom_job)
-            except tk.TclError:
-                pass
+            self.root.after_cancel(self._zoom_job)
             self._zoom_job = None
         if self._pending_zoom is not None:
             z, self._pending_zoom = self._pending_zoom, None
             self.set_zoom(z)
 
     def _build_size(self):
-        """Gecerli orana gore cizeri/tuvali hazirlar, pencere olcusunu dondurur."""
+        """Gecerli orana gore cizeri hazirlar, pencere olcusunu dondurur."""
+        # Surekli boyutta sonsuz cizer olabilir; anahtar olarak pencerenin
+        # piksel olcusu kullaniliyor (ayni olcu = ayni cizim) ve son
+        # kullanilanlardan birkaci tutuluyor.
         scale = self.dpi * self.zoom
-        if HAVE_PIL:
-            # Surekli boyutta sonsuz cizer olabilir; anahtar olarak pencerenin
-            # piksel olcusu kullaniliyor (ayni olcu = ayni cizim) ve son
-            # kullanilanlardan birkaci tutuluyor.
-            key = window_size(scale)
-            r = self._renderers.get(key)
-            if r is None:
-                r = Renderer(scale)
-                if len(self._renderers) > 8:
-                    self._renderers.clear()
-                self._renderers[key] = r
-            self.renderer = r
-            return r.iw, r.ih
-
-        # Pillow yoksa: tuvali bastan ciz
-        w, h = int(42 * scale), int(78 * scale)
-        self.view.config(width=w, height=h)
-        self.view.delete("all")
-        rr = max(2, int(7 * scale))
-        y = h // 2 - int(19 * scale)
-        self.f_lamps = []
-        for _ in range(3):
-            self.f_lamps.append(self.view.create_oval(
-                w // 2 - rr, y - rr, w // 2 + rr, y + rr,
-                fill="#1a1b20", outline=""))
-            y += int(19 * scale)
-        return w, h
+        key = window_size(scale)
+        r = self._renderers.get(key)
+        if r is None:
+            r = Renderer(scale)
+            if len(self._renderers) > 8:
+                self._renderers.clear()
+            self._renderers[key] = r
+        self.renderer = r
+        return r.iw, r.ih
 
     def set_zoom(self, z):
         """Boyutu degistirir; nereye capalanacagini self._anchor belirler.
@@ -1387,7 +1273,7 @@ class HUD:
           cluster_left   ... sol kenari (panel kaydiricisi: panel kipirdamaz)
         """
         z = max(ZOOM_MIN, min(ZOOM_MAX, z))
-        if window_size(self.dpi * z) == self._size and self.renderer is not None:
+        if window_size(self.dpi * z) == self._size:
             # Pencere ayni boyda kaliyor; yalnizca paneldeki yuzde guncellensin.
             self.zoom = z
             self._draw_panel()
@@ -1446,11 +1332,7 @@ class HUD:
         # Bu pencere hicbir zaman odak almiyor; tekerlek yine de geliyor
         # cunku Windows 10/11'de "fareyle uzerine gelinen pencereyi kaydir"
         # varsayilan olarak acik. Kapaliysa Ctrl+surukleme ve menu calisir.
-        if getattr(e, "num", None) in (4, 5):
-            step = 1 if e.num == 4 else -1
-        else:
-            step = 1 if e.delta > 0 else -1
-        self.set_zoom(self.zoom * (ZOOM_WHEEL if step > 0 else 1 / ZOOM_WHEEL))
+        self.set_zoom(self.zoom * (ZOOM_WHEEL if e.delta > 0 else 1 / ZOOM_WHEEL))
 
     # Ctrl + sol tik surukleme: ayiriciyla ayni, alt kenar imleci izler.
     # Dugme olaylari odak gerektirmedigi icin bu her zaman calisir.
@@ -1468,7 +1350,7 @@ class HUD:
         want = e.y_root - self._grab_off - self._anchor[2]
         self._request_zoom(want / (BOX_H * self.dpi))
 
-    def _release(self, _e=None):
+    def _release(self, _e):
         if self._resizing:
             self._flush_zoom()
             self._resizing = False
@@ -1508,19 +1390,17 @@ class HUD:
         self.view.bind("<Control-Button-1>", self._resize_grab)
         self.view.bind("<Control-B1-Motion>", self._resize_drag)
 
-        # tekerlek: buyut / kucult (Linux'ta ayri dugme olaylari geliyor)
-        for w in (self.root, self.view):
-            w.bind("<MouseWheel>", self._wheel)
-            w.bind("<Button-4>", self._wheel)
-            w.bind("<Button-5>", self._wheel)
+        # Tekerlek: buyut / kucult. Yalnizca isige baglaniyor - pencereye de
+        # baglayinca etiketin olayi iki kez geliyor, her tik iki kat
+        # buyutuyordu.
+        self.view.bind("<MouseWheel>", self._wheel)
 
         self.menu = tk.Menu(self.root, tearoff=0, bd=0, relief="flat",
                             bg="#1b1c20", fg="#e8e9ee",
                             activebackground="#2c2e36", activeforeground="#ffffff",
                             font=("Segoe UI", 9))
-        if HAVE_PIL:
-            self.menu.add_command(label="Ayarlar…", command=self._open_panel)
-            self.menu.add_separator()
+        self.menu.add_command(label="Ayarlar…", command=self._open_panel)
+        self.menu.add_separator()
         self.menu.add_command(label="Büyüt",
                               command=lambda: self.set_zoom(self.zoom * ZOOM_MENU))
         self.menu.add_command(label="Küçült",
@@ -1551,7 +1431,7 @@ class HUD:
         self.root.geometry(f"+{x}+{y}")
         self._layout()
 
-    def _save_pos(self, _e=None):
+    def _save_pos(self):
         try:
             with open(POS_FILE, "w", encoding="utf-8") as f:
                 f.write("%d,%d" % self._xy)
@@ -1614,25 +1494,14 @@ class HUD:
 
     def _paint(self, steps):
         self._sig = steps
-        if self.renderer:
-            self._photo = ImageTk.PhotoImage(self.renderer.frame(steps))
-            self.view.configure(image=self._photo)
-        else:
-            for i, item in enumerate(self.f_lamps):
-                col = blend(blend(LAMP_RGB[i], LAMP_OFF, 0.90),
-                            LAMP_RGB[i], steps[i] / 20.0)
-                self.view.itemconfig(item, fill="#%02x%02x%02x" % col)
+        self._photo = ImageTk.PhotoImage(self.renderer.frame(steps))
+        self.view.configure(image=self._photo)
 
     def run(self):
         self.root.mainloop()
 
 
 if __name__ == "__main__":
-    _lock = acquire_singleton()
-    if not _lock:
+    if not acquire_singleton():
         sys.exit(0)              # zaten bir HUD acik
-    write_pid()
-    try:
-        HUD().run()
-    finally:
-        clear_pid()
+    HUD().run()
