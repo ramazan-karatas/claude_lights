@@ -63,3 +63,7 @@ White), always-on-top, pulse animation, position lock and a status caption.
 - Needs X11 or XWayland.
 - Soft shadows aren't drawn, and Liquid glass uses a flat gray backdrop
   instead of the blurred desktop.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
