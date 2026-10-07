@@ -15,6 +15,8 @@ UIB_FONT = "seguisb.ttf"        # Segoe UI Semibold
 ICON_FONT = ("SegoeIcons.ttf"
              if os.path.exists(os.path.join(FONTS_DIR, "SegoeIcons.ttf"))
              else "segmdl2.ttf")
+GEAR_GLYPH = ""
+CLOSE_GLYPH = ""
 
 
 def system_is_turkish():

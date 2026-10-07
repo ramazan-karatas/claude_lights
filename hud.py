@@ -40,9 +40,14 @@ import tkinter as tk
 from PIL import (Image, ImageChops, ImageDraw, ImageEnhance, ImageFilter,
                  ImageFont)
 
-from platform_win import (FONTS_DIR, ICON_FONT, UI_FONT, UIB_FONT, Layer,
-                          acquire_singleton, capture, enable_dpi_awareness,
-                          system_is_turkish)
+if sys.platform == "win32":
+    from platform_win import (CLOSE_GLYPH, FONTS_DIR, GEAR_GLYPH, ICON_FONT,
+                              UI_FONT, UIB_FONT, Layer, acquire_singleton,
+                              capture, enable_dpi_awareness, system_is_turkish)
+else:
+    from platform_linux import (CLOSE_GLYPH, FONTS_DIR, GEAR_GLYPH, ICON_FONT,
+                                UI_FONT, UIB_FONT, Layer, acquire_singleton,
+                                capture, enable_dpi_awareness, system_is_turkish)
 
 STATE_FILE = os.path.join(tempfile.gettempdir(), "cc_hud_state.txt")
 POS_FILE = os.path.join(tempfile.gettempdir(), "cc_hud_pos.txt")
@@ -121,9 +126,6 @@ PANEL_SHADOW = 14    # panel golgesi icin kenar payi
 
 ACCENT_RGB = (52, 211, 153)
 KNOB_RGB = (246, 247, 249)
-
-GEAR_GLYPH = ""
-CLOSE_GLYPH = ""
 
 # Olculer (mantiksal piksel; DPI'ya gore olceklenir)
 MARGIN = 6           # govde cevresindeki pay - golge ve kenar yumusatmasi icin
@@ -1230,7 +1232,8 @@ class HUD:
             win.bind("<B1-Motion>", self._drag)
             win.bind("<ButtonRelease-1>", self._release)
             win.bind("<Button-3>", self._popup)
-            win.bind("<MouseWheel>", self._wheel)
+            for ev in ("<MouseWheel>", "<Button-4>", "<Button-5>"):   # X11: 4/5
+                win.bind(ev, self._wheel)
         self._cap_on = True
         self._measure_caption()
         self._layout()
@@ -1579,7 +1582,7 @@ class HUD:
         # Bu pencere hicbir zaman odak almiyor; tekerlek yine de geliyor
         # cunku Windows 10/11'de "fareyle uzerine gelinen pencereyi kaydir"
         # varsayilan olarak acik. Kapaliysa Ctrl+surukleme ve menu calisir.
-        self.set_zoom(self.zoom * (ZOOM_WHEEL if e.delta > 0 else 1 / ZOOM_WHEEL))
+        self.set_zoom(self.zoom * (ZOOM_WHEEL if e.delta > 0 or e.num == 4 else 1 / ZOOM_WHEEL))
 
     # Ctrl + sol tik surukleme: ayiriciyla ayni, alt kenar imleci izler.
     # Dugme olaylari odak gerektirmedigi icin bu her zaman calisir.
@@ -1631,7 +1634,8 @@ class HUD:
         # Kok pencereye baglanan olaylar menu gibi alt pencerelerden de
         # geliyor; yalnizca isigin kendisinden gelenler isleniyor.
         def own(handler):
-            return lambda e: handler(e) if e.widget is self.root else None
+            return lambda e: (handler(e) if isinstance(e.widget, tk.Misc)
+                              and e.widget.winfo_toplevel() is self.root else None)
 
         root = self.root
         root.bind("<Button-1>", own(self._grab))
@@ -1641,7 +1645,8 @@ class HUD:
         # Ctrl'lu olaylar daha ozel oldugu icin yukaridakilerin onune geciyor
         root.bind("<Control-Button-1>", own(self._resize_grab))
         root.bind("<Control-B1-Motion>", own(self._resize_drag))
-        root.bind("<MouseWheel>", own(self._wheel))
+        for ev in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            root.bind(ev, own(self._wheel))
 
         self.menu = tk.Menu(root, tearoff=0, bd=0, relief="flat",
                             bg="#1b1c20", fg="#e8e9ee",
