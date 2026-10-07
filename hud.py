@@ -61,12 +61,29 @@ DEFAULT_ZOOM = 1.0
 ZOOM_WHEEL = 1.10    # bir tekerlek tiki
 ZOOM_MENU = 1.25     # menuden buyut/kucult
 
+# Arayuz dili Windows'tan alinir: Turkce sistemde Turkce, digerlerinde Ingilizce
+EN = {"Klasik": "Classic", "Sıvı cam": "Liquid glass", "Siyah": "Black",
+      "Beyaz": "White", "Boşta": "Idle", "Girdi bekliyor": "Waiting for input",
+      "Çalışıyor": "Working", "Tasarım": "Design", "Tema": "Theme",
+      "Boyut": "Size", "Her zaman üstte": "Always on top",
+      "Nabız animasyonu": "Pulse animation", "Konumu kilitle": "Lock position",
+      "Durum yazısını göster": "Show status text",
+      "Varsayılana dön": "Reset to defaults", "Kapat": "Close",
+      "Ayarlar": "Settings", "Ayarlar…": "Settings…", "Büyüt": "Enlarge",
+      "Küçült": "Shrink", "Normal boyut": "Normal size", "Ortala": "Center"}
+TURKISH = ctypes.windll.kernel32.GetUserDefaultUILanguage() & 0x3FF == 0x1F
+
+
+def T(text):
+    return text if TURKISH else EN.get(text, text)
+
+
 # Gorunum secenekleri
 DESIGNS = ("solid", "glass")
 THEMES = ("dark", "light")
 CHOICES = {"design": DESIGNS, "theme": THEMES}
-CHOICE_LABELS = {"solid": "Klasik", "glass": "Sıvı cam",
-                 "dark": "Siyah", "light": "Beyaz"}
+CHOICE_LABELS = {"solid": T("Klasik"), "glass": T("Sıvı cam"),
+                 "dark": T("Siyah"), "light": T("Beyaz")}
 
 DEFAULT_SETTINGS = {
     "design": "solid",   # klasik ya da sivi cam
@@ -128,11 +145,11 @@ BLOOM_R = 13         # yanan lambanin dagilma yaricapi
 LAMP_ORDER = ("red", "yellow", "green")
 
 STATES = {
-    "red":    {"label": "Boşta",          "rgb": (240, 92, 88),
+    "red":    {"label": T("Boşta"),          "rgb": (240, 92, 88),
                "pulse": 0.00, "idx": 0},
-    "yellow": {"label": "Girdi bekliyor", "rgb": (250, 198, 54),
+    "yellow": {"label": T("Girdi bekliyor"), "rgb": (250, 198, 54),
                "pulse": 1.15, "idx": 1},
-    "green":  {"label": "Çalışıyor",      "rgb": (52, 211, 153),
+    "green":  {"label": T("Çalışıyor"),      "rgb": (52, 211, 153),
                "pulse": 0.45, "idx": 2},
 }
 LAMP_RGB = tuple(STATES[name]["rgb"] for name in LAMP_ORDER)
@@ -843,13 +860,13 @@ class Panel:
     ustune ekleniyor - fare gezerken yeniden cizim hafif kalsin.
     """
 
-    ROWS = (("design", "Tasarım", "seg"),
-            ("theme", "Tema", "seg"),
-            ("size", "Boyut", "slider"),
-            ("topmost", "Her zaman üstte", "toggle"),
-            ("pulse", "Nabız animasyonu", "toggle"),
-            ("lock", "Konumu kilitle", "toggle"),
-            ("label", "Durum yazısını göster", "toggle"))
+    ROWS = (("design", T("Tasarım"), "seg"),
+            ("theme", T("Tema"), "seg"),
+            ("size", T("Boyut"), "slider"),
+            ("topmost", T("Her zaman üstte"), "toggle"),
+            ("pulse", T("Nabız animasyonu"), "toggle"),
+            ("lock", T("Konumu kilitle"), "toggle"),
+            ("label", T("Durum yazısını göster"), "toggle"))
 
     def __init__(self, scale, st):
         self.scale = scale
@@ -887,7 +904,7 @@ class Panel:
         self.seg_x = right - self.seg_w
 
         self.close_c = (right - s(5), m + self.head // 2 + s(1))
-        reset_w = int(self.f_small.getlength("Varsayılana dön"))
+        reset_w = int(self.f_small.getlength(T("Varsayılana dön")))
 
         hit = s(12)
         self.regions = [
@@ -898,7 +915,7 @@ class Panel:
                         self.row_cy["size"] + self.row // 2)),
             ("reset", (m + self.pad - s(6), self.foot_y,
                        m + self.pad + reset_w + s(6), m + self.h)),
-            ("quit", (right - int(self.f_small.getlength("Kapat")) - s(6), self.foot_y,
+            ("quit", (right - int(self.f_small.getlength(T("Kapat"))) - s(6), self.foot_y,
                       right + s(6), m + self.h)),
         ]
         for key, _, kind in self.ROWS:
@@ -944,7 +961,7 @@ class Panel:
         s, m, st = self.s, self.m, self.st
         img = card(self.w, self.h, s(12), m, "panel", st, self.scale, backdrop)
         stroke(img, st["text"], lambda d: d.text(
-            (m + self.pad, m + self.head // 2 + s(1)), "Ayarlar",
+            (m + self.pad, m + self.head // 2 + s(1)), T("Ayarlar"),
             font=self.f_title, fill=255, anchor="lm"))
         lw = max(1, s(0.6))
         stroke(img, st["line"], lambda d: [
@@ -1049,10 +1066,10 @@ class Panel:
             (m + self.w - self.pad, self.row_cy["size"]), "%d%%" % round(zoom * 100),
             font=self.f_small, fill=255, anchor="rm"))
         stroke(img, st["text"] if hover == "reset" else st["muted"], lambda d: d.text(
-            (m + self.pad, self.foot_y + self.foot // 2), "Varsayılana dön",
+            (m + self.pad, self.foot_y + self.foot // 2), T("Varsayılana dön"),
             font=self.f_small, fill=255, anchor="lm"))
         stroke(img, (232, 72, 66) if hover == "quit" else st["muted"], lambda d: d.text(
-            (m + self.w - self.pad, self.foot_y + self.foot // 2), "Kapat",
+            (m + self.w - self.pad, self.foot_y + self.foot // 2), T("Kapat"),
             font=self.f_small, fill=255, anchor="rm"))
         draw_icon(img, self.close_c[0], self.close_c[1], CLOSE_GLYPH, self.icon_px,
                   st["text"] if hover == "close" else st["muted"])
@@ -1820,17 +1837,17 @@ class HUD:
                             bg="#1b1c20", fg="#e8e9ee",
                             activebackground="#2c2e36", activeforeground="#ffffff",
                             font=("Segoe UI", 9))
-        self.menu.add_command(label="Ayarlar…", command=self._open_panel)
+        self.menu.add_command(label=T("Ayarlar…"), command=self._open_panel)
         self.menu.add_separator()
-        self.menu.add_command(label="Büyüt",
+        self.menu.add_command(label=T("Büyüt"),
                               command=lambda: self.set_zoom(self.zoom * ZOOM_MENU))
-        self.menu.add_command(label="Küçült",
+        self.menu.add_command(label=T("Küçült"),
                               command=lambda: self.set_zoom(self.zoom / ZOOM_MENU))
-        self.menu.add_command(label="Normal boyut", command=self.reset_zoom)
+        self.menu.add_command(label=T("Normal boyut"), command=self.reset_zoom)
         self.menu.add_separator()
-        self.menu.add_command(label="Ortala", command=self.center)
+        self.menu.add_command(label=T("Ortala"), command=self.center)
         self.menu.add_separator()
-        self.menu.add_command(label="Kapat", command=root.destroy)
+        self.menu.add_command(label=T("Kapat"), command=root.destroy)
 
     def _popup(self, e):
         try:
