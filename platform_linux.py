@@ -61,26 +61,33 @@ class Layer:
 
     def __init__(self, win, topmost):
         self.win = win
-        win.withdraw()
+        # Pencere hic gizlenmiyor: bazi bilesikciler (WSLg) gizlenip yeniden
+        # gosterilen kenarliksiz pencereyi bir daha gostermiyor. Gizlemek
+        # yerine bicim bosaltiliyor.
         win.overrideredirect(True)
         win.attributes("-topmost", topmost)
+        win.geometry("1x1+0+0")
         self.view = tk.Label(win, bd=0, highlightthickness=0, padx=0, pady=0)
         self.view.place(x=0, y=0)
+        win.update_idletasks()
         self.photo = None
         self.mask = None
         self.img = None
         self.xy = None
         self.size = None
-        self.visible = False
+        self.visible = True
+        self.hide()
 
     def _shape(self, img):
         bits = img.getchannel("A").point(lambda a: 255 if a >= ALPHA_CUT else 0).convert("1")
-        data = bits.tobytes("raw", "1;R")      # XBM: satir basina bayt, once dusuk bit
+        self._set_mask(bits.tobytes("raw", "1;R"), img.size)   # XBM: once dusuk bit
+
+    def _set_mask(self, data, size):
         if data == self.mask:
             return
         self.mask = data
         xid = int(self.win.wm_frame(), 16)
-        pixmap = _x11.XCreateBitmapFromData(_dpy, xid, data, img.size[0], img.size[1])
+        pixmap = _x11.XCreateBitmapFromData(_dpy, xid, data, size[0], size[1])
         _xext.XShapeCombineMask(_dpy, xid, SHAPE_BOUNDING, 0, 0, pixmap, SHAPE_SET)
         _x11.XFreePixmap(_dpy, pixmap)
         _x11.XFlush(_dpy)
@@ -90,15 +97,12 @@ class Layer:
             return
         if img.size != self.size or (x, y) != self.xy:
             self.win.geometry("%dx%d+%d+%d" % (img.size[0], img.size[1], x, y))
-        new = img is not self.img
-        if new:
+        new = img is not self.img or not self.visible
+        if img is not self.img:
             self.photo = ImageTk.PhotoImage(img.convert("RGB"))
             self.view.configure(image=self.photo)
         self.img, self.size, self.xy = img, img.size, (x, y)
-        if not self.visible:
-            self.win.deiconify()
-            self.visible = True
-        self.win.update_idletasks()          # X penceresi olussun, sonra bicimle
+        self.visible = True
         if new:
             self._shape(img)
 
@@ -108,7 +112,7 @@ class Layer:
 
     def hide(self):
         if self.visible:
-            self.win.withdraw()
+            self._set_mask(b"\0", (1, 1))    # bos bicim: gorunmez, tiklama gecer
             self.visible = False
 
     def exclude_from_capture(self, on):
